@@ -377,10 +377,17 @@ func (s *Subsystem) signalAnswer(callID string) {
 
 // endCall retracts the ghost membership and marks the call ended. It is
 // idempotent, because a hangup can be observed from more than one direction.
+//
+// The context is detached: the usual caller is holding an inbound leg, and that
+// leg's context is already cancelled by the time the leg is gone. Cleaning up
+// on a cancelled context would leave the membership pinned in the room, which
+// is exactly the failure this function exists to prevent.
 func (s *Subsystem) endCall(ctx context.Context, call *database.Call) error {
 	if call.State == database.StateEnded {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	s.forgetSeen(call.CallID)
 	s.signalAnswer(call.CallID)
 	if leg := s.takeLeg(call.CallID); leg != nil {
@@ -512,7 +519,7 @@ func (s *Subsystem) onMatrixLeftCall(ctx context.Context, portal *bridgev2.Porta
 	// The bridge has no channel of its own to hang up any more. Removing the
 	// LiveKit participant drops livekit-sip's leg out of the conference, which
 	// ends the call only if the conference is configured to end when that leg
-	// leaves. See the dialplan contract in the README.
+	// leaves. See the SIP server contract in the README.
 	s.removeParticipant(ctx, call, log)
 	if err := s.endCall(ctx, call); err != nil {
 		log.Warn().Err(err).Msg("Failed to end call")
