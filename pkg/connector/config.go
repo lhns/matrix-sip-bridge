@@ -13,9 +13,9 @@ import (
 //go:embed example-config.yaml
 var ExampleConfig string
 
-// Config is the network half of the bridge config file. Nothing in it has a
-// useful default: every value describes one particular SIP server, LiveKit and
-// trunk.
+// Config is the network half of the bridge config file. Most of it describes
+// one particular SIP server, LiveKit and trunk; applyDefaults fills in only
+// the values that are protocol constants rather than site facts.
 type Config struct {
 	SIP      siptransport.Config `yaml:"sip"`
 	Messages MessageConfig       `yaml:"messages"`

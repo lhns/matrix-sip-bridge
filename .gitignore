@@ -23,7 +23,8 @@ vendor/
 .DS_Store
 Thumbs.db
 
-# Runtime state: these contain the homeserver tokens and the AMI secret.
+# Runtime state: these contain the homeserver tokens and the SIP and LiveKit
+# credentials.
 config.yaml
 registration.yaml
 *.local.yaml

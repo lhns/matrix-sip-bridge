@@ -4,7 +4,7 @@
 // the bridge like any other endpoint, and call policy stays in the server's
 // own routing. The bridge has no media stack. An inbound call leg is a control
 // leg that exists to be answered and then hung up by the dialplan; the audio
-// goes Asterisk <-> livekit-sip <-> LiveKit and never through this process.
+// goes SIP server <-> livekit-sip <-> LiveKit and never through this process.
 package siptransport
 
 import (
