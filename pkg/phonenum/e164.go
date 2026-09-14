@@ -1,6 +1,7 @@
 // Package phonenum converts between the several spellings of a phone number
 // that the bridge has to deal with: E.164 as humans write it, the bare-digit
-// form used as a bridgev2 portal/user ID, and SIP URIs as Asterisk emits them.
+// form used as a bridgev2 portal/user ID, and SIP URIs as they arrive on the
+// wire.
 package phonenum
 
 import (

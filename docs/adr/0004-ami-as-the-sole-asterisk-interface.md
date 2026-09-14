@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR-0008](0008-the-bridge-is-a-sip-endpoint.md)
 
 ## Context
 

@@ -147,7 +147,7 @@ func supportsOwnedStateKeys(version id.RoomVersion) bool {
 // the same triple of user ID, device ID and member ID is hashed into the
 // LiveKit participant identity: Element Call filters audio tracks to the
 // identities its membership list derives, and an unmatched participant is
-// inaudible as well as invisible. See ADR-0011.
+// inaudible as well as invisible. See ADR-0010.
 func ghostMembership(userID id.UserID, deviceID, membershipID string, expiry time.Duration) *event.Content {
 	now := time.Now()
 	return &event.Content{Raw: map[string]any{

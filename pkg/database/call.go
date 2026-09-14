@@ -15,7 +15,7 @@ const (
 	// DirectionInbound is a call from the phone network, offered to the bridge
 	// as an INVITE naming the conference it will land in.
 	DirectionInbound CallDirection = "inbound"
-	// DirectionOutbound is a call the bridge asked Asterisk to place.
+	// DirectionOutbound is a call the bridge asked the SIP server to place.
 	DirectionOutbound CallDirection = "outbound"
 )
 
@@ -37,7 +37,8 @@ const (
 type Call struct {
 	qh *dbutil.QueryHelper[*Call]
 
-	// CallID is the bridge's own identifier, not Asterisk's and not LiveKit's.
+	// CallID is the bridge's own identifier, not the SIP server's and not
+	// LiveKit's.
 	CallID string
 	// PortalID is the E.164 number without the leading plus, matching the
 	// bridgev2 portal and ghost IDs.

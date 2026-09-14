@@ -1,5 +1,5 @@
-// Command matrix-sip-bridge bridges Matrix to a SIP/telephony network reached
-// through Asterisk: text as SIP MESSAGE, and calls as real media via LiveKit.
+// Command matrix-sip-bridge bridges Matrix to a SIP network as an endpoint of
+// it: text as SIP MESSAGE, and calls as real media via LiveKit.
 package main
 
 import (
@@ -22,7 +22,7 @@ var (
 func main() {
 	m := mxmain.BridgeMain{
 		Name:        "matrix-sip-bridge",
-		Description: "A Matrix-SIP bridge for messages and calls through Asterisk",
+		Description: "A Matrix bridge that is a SIP endpoint, for messages and calls",
 		URL:         "https://github.com/lhns/matrix-sip-bridge",
 		Version:     Version,
 		Connector:   &connector.SIPConnector{},

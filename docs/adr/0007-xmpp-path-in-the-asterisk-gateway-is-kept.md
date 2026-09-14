@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR-0009](0009-the-sip-server-is-configured-for-the-bridge.md)
 
 ## Context
 

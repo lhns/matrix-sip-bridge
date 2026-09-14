@@ -23,9 +23,9 @@ type LiveKitConfig struct {
 
 	// TrunkName identifies the outbound trunk object the bridge reconciles.
 	TrunkName string `yaml:"trunk_name"`
-	// TrunkAddress is the SIP host livekit-sip dials to reach Asterisk.
+	// TrunkAddress is the SIP host livekit-sip dials to reach the conference.
 	TrunkAddress string `yaml:"trunk_address"`
-	// TrunkNumber is the caller number livekit-sip presents to Asterisk.
+	// TrunkNumber is the caller number livekit-sip presents.
 	TrunkNumber string `yaml:"trunk_number"`
 	// TrunkAuthUsername and TrunkAuthPassword are optional SIP digest
 	// credentials for the trunk.

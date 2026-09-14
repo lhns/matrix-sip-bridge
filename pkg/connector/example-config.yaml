@@ -56,10 +56,11 @@ calls:
     # conference as its own, so an INVITE naming anything else is declined.
     conference_prefix: sip-
     # URI an outbound control leg is sent to when a Matrix user starts a call.
-    # {number} is replaced with the destination in E.164 including the plus.
-    # The dialplan is expected to read the conference header, dial the number
-    # into that conference, and hang the control leg up.
-    outbound_uri: sip:matrix-outbound@pbx.example.com
+    # {number} is replaced with the destination in E.164 including the plus, so
+    # the dialplan can match on the extension. The dialplan is expected to read
+    # the conference header, dial the number into that conference, and hang the
+    # control leg up.
+    outbound_uri: sip:{number}@pbx.example.com
     # Lifetime written into the caller ghost's RTC membership. The bridge
     # publishes it when a call starts and retracts it when the call ends, and
     # never refreshes it, so this is not a liveness signal. It only bounds how

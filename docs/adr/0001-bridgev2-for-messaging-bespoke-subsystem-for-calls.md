@@ -31,7 +31,7 @@ its event plumbing.
 - Messaging gets portals, dedup, relay mode, provisioning and `-g` for free.
 - Calls carry their own Matrix event subscription, their own state table and
   their own lifecycle; nothing about them appears in bridgev2's database.
-- The two halves share one AMI connection, because Asterisk multiplexes actions
-  and events over a single manager session.
+- The two halves share one SIP endpoint, because a second registration of the
+  same identity would be a competing contact for the same calls and messages.
 - A future bridgev2 that grows MatrixRTC support would make the subsystem
   redundant, not wrong.

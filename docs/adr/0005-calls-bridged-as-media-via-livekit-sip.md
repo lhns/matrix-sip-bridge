@@ -16,12 +16,15 @@ park a call in a ConfBridge that livekit-sip then dials.
 
 ## Decision
 
-Bridge calls as real media. Inbound: Asterisk parks the caller in
-`ConfBridge(sip-<number>)`, the bridge publishes an RTC membership for the
-caller's ghost so Matrix rings, and when a Matrix user joins the session the
-bridge calls LiveKit's `CreateSIPParticipant` so livekit-sip dials the
-ConfBridge and joins the room. Outbound: the bridge originates into the same
-ConfBridge and does the same thing.
+Bridge calls as real media, through a conference the bridge never enters.
+Inbound: the SIP server dials the bridge with the conference name in a header,
+the bridge publishes an RTC membership for the caller's ghost so Matrix rings,
+and calls LiveKit's `CreateSIPParticipant` so livekit-sip dials that conference
+and joins the LiveKit room. The bridge answers only once a Matrix user has
+joined, and the dialplan then hangs its leg up so the caller falls into the
+conference. Outbound: the bridge sends an INVITE carrying the same header and
+does the same thing. See [ADR-0008](0008-the-bridge-is-a-sip-endpoint.md) for
+how that replaced AMI.
 
 Two derived facts are load-bearing:
 
@@ -44,8 +47,9 @@ for three RPCs.
 - livekit-sip needs an outbound trunk object. It lives in Redis and is lost on a
   Redis restart, with no event to say so, so the bridge reconciles it at startup
   and on a timer (`ListSIPOutboundTrunk`, create if absent).
-- Asterisk answers the inbound channel in order to park it, so an unanswered
-  call would sit in silence forever. `ring_timeout` hangs it up.
-- The ghost's RTC membership carries an expiry and is refreshed at half that
-  interval; a bridge that dies mid-call leaves a membership that clients discard
-  when it lapses.
+- An unanswered call must not ring forever, so `ring_timeout` declines the
+  bridge's branch with 480 and lets the other endpoints carry on.
+- The bridge has no conference event and no channel of its own to watch, so the
+  SIP participant leaving the LiveKit room is what ends a call. See
+  [ADR-0010](0010-element-call-filters-audio-by-rtc-membership.md) for the
+  membership lifecycle that hangs off it.

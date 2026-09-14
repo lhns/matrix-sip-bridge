@@ -1,6 +1,7 @@
-// Package calls bridges telephone calls as real media: Asterisk parks the far
-// end in a ConfBridge, and livekit-sip is told to dial that ConfBridge and join
-// the LiveKit room that backs the portal room's Element Call.
+// Package calls bridges telephone calls as real media: the SIP server parks the
+// far end in a conference, and livekit-sip is told to dial that conference and
+// join the LiveKit room that backs the portal room's Element Call. The bridge
+// itself never enters either.
 package calls
 
 import (

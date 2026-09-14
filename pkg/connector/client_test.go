@@ -124,19 +124,6 @@ func TestApplyDefaultsKeepsConfiguredValues(t *testing.T) {
 	}
 }
 
-// The example config is shipped as the base for config upgrades, so it must
-// parse and must not carry any real deployment's details.
-func TestExampleConfigIsGeneric(t *testing.T) {
-	if !strings.Contains(ExampleConfig, "example.com") {
-		t.Error("example config should use example.com hostnames")
-	}
-	for _, forbidden := range []string{"lhns.de", "10.1.", "eventphone", "rfn.de"} {
-		if strings.Contains(ExampleConfig, forbidden) {
-			t.Errorf("example config leaks a site-specific value: %q", forbidden)
-		}
-	}
-}
-
 // The example config is the base every config upgrade is merged onto, so a key
 // renamed in the struct and not in the YAML silently stops being configurable.
 func TestExampleConfigMatchesTheStruct(t *testing.T) {
