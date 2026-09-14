@@ -250,6 +250,40 @@ func (c *LiveKitClient) CreateSIPParticipant(ctx context.Context, req *CreateSIP
 // trunks and SIP participants.
 const roomService = "livekit.RoomService"
 
+// createRoomRequest is the subset of livekit.CreateRoomRequest the bridge
+// sends. Every optional field is left zero on purpose: LiveKit only overwrites
+// empty_timeout, departure_timeout, max_participants and metadata on an
+// existing room when the request sets them, so an empty request cannot clobber
+// the settings the MatrixRTC authorisation service gave a room it created.
+type createRoomRequest struct {
+	Name string `json:"name"`
+}
+
+// Room is the subset of livekit.Room the bridge reads back.
+type Room struct {
+	Sid  string `json:"sid,omitempty"`
+	Name string `json:"name,omitempty"`
+}
+
+// EnsureRoom creates the LiveKit room if it does not exist yet.
+//
+// Nothing else will. MatrixRTC deployments run the SFU with room.auto_create
+// off and let the authorisation service create each room as it hands out the
+// first token, so a room nobody has joined from Matrix does not exist, and
+// livekit-sip -- whose own token carries no roomCreate grant -- cannot join
+// one: CreateSIPParticipant fails with "update room failed: not found".
+//
+// CreateRoom on an existing room is an update, not an error, so this is safe
+// to call before every call in either direction.
+func (c *LiveKitClient) EnsureRoom(ctx context.Context, room string) (*Room, error) {
+	var resp Room
+	g := grants{Video: &videoGrant{RoomCreate: true}}
+	if err := c.callService(ctx, roomService, "CreateRoom", g, &createRoomRequest{Name: room}, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 type listParticipantsRequest struct {
 	Room string `json:"room"`
 }

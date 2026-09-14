@@ -573,6 +573,12 @@ func (s *Subsystem) bridgeMedia(ctx context.Context, call *database.Call) error 
 	if err != nil {
 		return err
 	}
+	// The room has to exist before livekit-sip is asked to join it. On a fresh
+	// portal the bridge is the first participant of the session, and nothing
+	// else creates the room: see EnsureRoom.
+	if _, err := s.lk.EnsureRoom(ctx, call.LKRoom); err != nil {
+		return fmt.Errorf("ensure LiveKit room: %w", err)
+	}
 	participant, err := s.lk.CreateSIPParticipant(ctx, &CreateSIPParticipantRequest{
 		SipTrunkID: trunkID,
 		// livekit-sip dials the conference as if it were a phone number; the

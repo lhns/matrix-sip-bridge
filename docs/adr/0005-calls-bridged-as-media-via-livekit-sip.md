@@ -33,6 +33,13 @@ Two derived facts are load-bearing:
   standard base64 alphabet, no padding. lk-jwt-service computes this; the bridge
   must produce the identical string or it joins an empty room of its own. Golden
   vectors from the MSC4195 appendix are in `pkg/calls/identity_test.go`.
+- The LiveKit room does not exist until something creates it. A MatrixRTC
+  deployment runs the SFU with `room.auto_create` off and has the authorisation
+  service create each room as it issues the first token, and livekit-sip's own
+  token carries no `roomCreate` grant, so on a portal nobody has joined from
+  Matrix `CreateSIPParticipant` fails with `update room failed: not found`. The
+  bridge therefore calls `CreateRoom` first, exactly as the authorisation
+  service does for a Matrix participant.
 - Inbound participants created by a LiveKit *dispatch rule* are named
   `sip_<caller>` by LiveKit and can never match a Matrix RTC membership. Only
   `CreateSIPParticipant` lets the identity be chosen, which is why the bridge
@@ -47,6 +54,8 @@ for three RPCs.
 - livekit-sip needs an outbound trunk object. It lives in Redis and is lost on a
   Redis restart, with no event to say so, so the bridge reconciles it at startup
   and on a timer (`ListSIPOutboundTrunk`, create if absent).
+- The bridge's LiveKit API key must be allowed to create rooms, which the
+  standard `roomCreate` grant on its own key gives it.
 - An unanswered call must not ring forever, so `ring_timeout` declines the
   bridge's branch with 480 and lets the other endpoints carry on.
 - The bridge has no conference event and no channel of its own to watch, so the
