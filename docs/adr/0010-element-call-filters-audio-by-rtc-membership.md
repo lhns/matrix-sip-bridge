@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted
+Accepted, amended by ADR-0012
+
+The identity derivation below is one of two schemes, and not the one this
+bridge emits by default. What has to be in the membership for a client to use
+it at all is ADR-0012.
 
 ## Context
 

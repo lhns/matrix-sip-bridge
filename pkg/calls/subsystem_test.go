@@ -9,8 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
+
+	"github.com/lhns/matrix-sip-bridge/pkg/database"
 )
 
 func TestConferenceNameRoundTrip(t *testing.T) {
@@ -212,5 +215,61 @@ func moduleRoot(t *testing.T) string {
 			t.Fatal("could not find the module root")
 		}
 		dir = parent
+	}
+}
+
+// A row left in progress by an interrupted setup blocks every later call from
+// the same number, because the conference is named after the number rather
+// than after the call. Nothing rings for longer than the ring timeout, so a
+// row that still says so afterwards is wreckage; a bridged call has no such
+// bound and is only given up on at the membership expiry.
+func TestCallIsStale(t *testing.T) {
+	s := &Subsystem{}
+	s.cfg.RingTimeout = 45 * time.Second
+	s.cfg.MembershipExpiry = 6 * time.Hour
+	now := time.Unix(1_700_000_000, 0)
+
+	tests := []struct {
+		name  string
+		call  database.Call
+		stale bool
+	}{
+		{
+			name:  "a call still ringing within the timeout",
+			call:  database.Call{State: database.StateRinging, CreatedAt: now.Add(-10 * time.Second)},
+			stale: false,
+		},
+		{
+			name:  "a call still ringing just past the timeout is inside the grace",
+			call:  database.Call{State: database.StateRinging, CreatedAt: now.Add(-50 * time.Second)},
+			stale: false,
+		},
+		{
+			name:  "a call still ringing minutes later cannot be",
+			call:  database.Call{State: database.StateRinging, CreatedAt: now.Add(-10 * time.Minute)},
+			stale: true,
+		},
+		{
+			name:  "a long bridged call is not stale",
+			call:  database.Call{State: database.StateBridged, UpdatedAt: now.Add(-time.Hour)},
+			stale: false,
+		},
+		{
+			name:  "a bridged call past the membership expiry is",
+			call:  database.Call{State: database.StateBridged, UpdatedAt: now.Add(-7 * time.Hour)},
+			stale: true,
+		},
+		{
+			name:  "an ended call is never stale",
+			call:  database.Call{State: database.StateEnded, UpdatedAt: now.Add(-7 * time.Hour)},
+			stale: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := s.callIsStale(&tt.call, now); got != tt.stale {
+				t.Errorf("callIsStale = %v, want %v", got, tt.stale)
+			}
+		})
 	}
 }

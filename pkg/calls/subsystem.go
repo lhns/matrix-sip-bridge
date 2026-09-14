@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -76,6 +77,11 @@ type Config struct {
 	// RingTimeout is how long an inbound call waits for a Matrix user to join
 	// the RTC session before the leg is declined.
 	RingTimeout time.Duration `yaml:"ring_timeout"`
+	// IdentityScheme selects how the caller ghost's LiveKit participant
+	// identity is derived. It has to match what the Element Call build the
+	// clients run derives for itself, and the two schemes cannot both be
+	// served. See ADR-0012 for how to tell which one a deployment needs.
+	IdentityScheme IdentityScheme `yaml:"identity_scheme"`
 	// ParticipantPollInterval is how often LiveKit is asked whether the SIP
 	// participant is still in the room. That is the only signal the bridge has
 	// that a call ended; see runParticipantWatcher.
@@ -111,6 +117,11 @@ type Subsystem struct {
 	answeredMu sync.Mutex
 	answered   map[string]chan struct{}
 
+	// ended is closed when a call is torn down, so the goroutine holding an
+	// inbound leg stops waiting without mistaking teardown for an answer.
+	endedMu sync.Mutex
+	ended   map[string]chan struct{}
+
 	// declined carries the "a Matrix user rejected the call" signal, and
 	// notifies names the ring notification each ringing call sent, so a
 	// decline can be matched to the call it refers to rather than to whatever
@@ -142,6 +153,9 @@ func New(cfg Config, br *bridgev2.Bridge, loginID networkid.UserLoginID, sip Tel
 	if cfg.ParticipantPollInterval <= 0 {
 		cfg.ParticipantPollInterval = 10 * time.Second
 	}
+	if cfg.IdentityScheme == "" {
+		cfg.IdentityScheme = IdentityUserDevice
+	}
 	return &Subsystem{
 		cfg:      cfg,
 		br:       br,
@@ -152,6 +166,7 @@ func New(cfg Config, br *bridgev2.Bridge, loginID networkid.UserLoginID, sip Tel
 		log:      log,
 		answered: make(map[string]chan struct{}),
 		declined: make(map[string]chan struct{}),
+		ended:    make(map[string]chan struct{}),
 		notifies: make(map[id.EventID]string),
 		legs:     make(map[string]OutboundLeg),
 		seen:     make(map[string]bool),
@@ -289,8 +304,8 @@ func (s *Subsystem) HandleInboundCall(ctx context.Context, leg InboundLeg) {
 
 // beginInboundCall creates the portal room, the call row and the ghost's RTC
 // membership, which is what makes Matrix ring.
-func (s *Subsystem) beginInboundCall(ctx context.Context, portalID, conference string) (*database.Call, error) {
-	if existing, err := s.db.Call.GetActiveByConference(ctx, conference); err != nil {
+func (s *Subsystem) beginInboundCall(ctx context.Context, portalID, conference string) (call *database.Call, retErr error) {
+	if existing, err := s.activeCallByConference(ctx, conference); err != nil {
 		return nil, fmt.Errorf("look up call: %w", err)
 	} else if existing != nil {
 		return nil, fmt.Errorf("conference %s already has call %s in progress", conference, existing.CallID)
@@ -302,7 +317,7 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, portalID, conference s
 	if portal.MXID == "" {
 		return nil, fmt.Errorf("portal %s has no Matrix room", portalID)
 	}
-	call := &database.Call{
+	call = &database.Call{
 		CallID:     newCallID(),
 		PortalID:   portalID,
 		RoomID:     portal.MXID,
@@ -314,6 +329,19 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, portalID, conference s
 	if err := s.db.Call.Insert(ctx, call); err != nil {
 		return nil, fmt.Errorf("insert call: %w", err)
 	}
+	// Setup can be interrupted at any point -- a slow database alone is enough
+	// to run it past the ring timeout and cancel it -- and a half-built row
+	// left in progress blocks every later call from the same number, because
+	// the conference is named after it. The row is therefore rolled back on
+	// every error path out of here.
+	defer func() {
+		if retErr != nil {
+			if err := s.endCall(context.WithoutCancel(ctx), call); err != nil {
+				s.log.Warn().Err(err).Str("call_id", call.CallID).
+					Msg("Failed to roll back a call that could not be set up")
+			}
+		}
+	}()
 	membership, err := s.publishGhostMembership(ctx, call)
 	if err != nil {
 		return nil, fmt.Errorf("publish ghost RTC membership: %w", err)
@@ -326,6 +354,8 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, portalID, conference s
 			Msg("Failed to send the ring notification; Matrix clients will not ring for this call")
 	} else {
 		s.rememberNotification(notify, call.CallID)
+		s.log.Info().Str("call_id", call.CallID).Stringer("notification", notify).
+			Msg("Sent the ring notification")
 	}
 	s.log.Info().
 		Str("call_id", call.CallID).
@@ -341,9 +371,17 @@ func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg 
 	defer s.forgetAnswerChannel(call.CallID)
 	declined := s.declineChannel(call.CallID)
 	defer s.forgetDeclineChannel(call.CallID)
+	ended := s.endedChannel(call.CallID)
+	defer s.forgetEndedChannel(call.CallID)
 
 	select {
 	case <-joined:
+	case <-ended:
+		// Teardown is not an answer. Answering here is what used to log
+		// "left the call" and "call answered" for the same call in the same
+		// breath, and rewrote the ended row back to bridged.
+		log.Info().Msg("Call ended before Matrix answered")
+		return
 	case <-declined:
 		log.Info().Msg("Matrix declined the call")
 		// 486 rather than 480: the difference is what the caller's network
@@ -365,14 +403,29 @@ func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg 
 		return
 	}
 
+	// The row moves to bridged before the leg is answered, not after: winning
+	// the transition is what makes this path the owner of the call. Answering
+	// first and recording it afterwards is how a call that teardown had
+	// already finished still got reported as answered.
+	// The write is detached from ctx: a call's context dies with its SIP leg,
+	// and teardown cancels it, so recording the outcome on it is how an
+	// answered call ended up logged as "context canceled".
+	recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	mine, err := s.db.Call.Transition(recordCtx, call, database.StateRinging, database.StateBridged)
+	cancelRecord()
+	if err != nil {
+		s.logSetupError(log, call, err, "Failed to record the answered call")
+		_ = s.endCall(ctx, call)
+		return
+	}
+	if !mine {
+		log.Info().Msg("Call ended while it was being answered")
+		return
+	}
 	if err := leg.Answer(); err != nil {
 		log.Err(err).Msg("Failed to answer the call")
 		_ = s.endCall(ctx, call)
 		return
-	}
-	call.State = database.StateBridged
-	if err := s.db.Call.Update(ctx, call); err != nil {
-		log.Err(err).Msg("Failed to record the answered call")
 	}
 	log.Info().Msg("Call answered; the dialplan now moves the caller into the conference")
 
@@ -381,6 +434,69 @@ func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg 
 	select {
 	case <-leg.Done():
 	case <-ctx.Done():
+	}
+}
+
+// logSetupError reports a failure during call setup or teardown at a level
+// that matches what it means.
+//
+// A cancellation is the expected consequence of the call going away, not a
+// fault: logging it as an error trains the reader to skip the errors that are
+// real.
+func (s *Subsystem) logSetupError(log zerolog.Logger, call *database.Call, err error, msg string) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		log.Debug().Err(err).Str("call_id", call.CallID).Msg(msg + " (the call was already going away)")
+		return
+	}
+	log.Err(err).Str("call_id", call.CallID).Msg(msg)
+}
+
+// activeCallByPortal and activeCallByConference return the call in progress,
+// ignoring -- and ending -- a row left behind by an interrupted setup.
+//
+// Without this a call whose setup was cut short stays "in progress" forever
+// and blocks every later call from the same number, because the conference is
+// named after the number rather than after the call.
+func (s *Subsystem) activeCallByPortal(ctx context.Context, portalID string) (*database.Call, error) {
+	call, err := s.db.Call.GetActiveByPortal(ctx, portalID)
+	return s.discardIfStale(ctx, call, err)
+}
+
+func (s *Subsystem) activeCallByConference(ctx context.Context, conference string) (*database.Call, error) {
+	call, err := s.db.Call.GetActiveByConference(ctx, conference)
+	return s.discardIfStale(ctx, call, err)
+}
+
+func (s *Subsystem) discardIfStale(ctx context.Context, call *database.Call, err error) (*database.Call, error) {
+	if err != nil || call == nil || !s.callIsStale(call, time.Now()) {
+		return call, err
+	}
+	s.log.Warn().Str("call_id", call.CallID).Str("state", string(call.State)).
+		Time("updated_at", call.UpdatedAt).
+		Msg("Discarding a call that cannot still be in progress")
+	if err := s.endCall(ctx, call); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// callIsStale reports whether a row claiming to be in progress cannot be.
+//
+// A ringing call is bounded by the ring timeout: nothing legitimately rings
+// for longer, so a row that still says ringing after it is the wreckage of an
+// interrupted setup. A bridged call has no such bound -- a real call can last
+// as long as the two ends keep talking -- so it is only given up on at the
+// membership expiry, which is when clients stop believing in it anyway.
+func (s *Subsystem) callIsStale(call *database.Call, now time.Time) bool {
+	switch call.State {
+	case database.StateRinging:
+		// The grace is for the setup work between the row being written and
+		// the leg actually ringing.
+		return now.Sub(call.CreatedAt) > s.cfg.RingTimeout+time.Minute
+	case database.StateBridged:
+		return now.Sub(call.UpdatedAt) > s.cfg.MembershipExpiry
+	default:
+		return false
 	}
 }
 
@@ -415,6 +531,38 @@ func (s *Subsystem) forgetDeclineChannel(callID string) {
 	s.declinedMu.Lock()
 	defer s.declinedMu.Unlock()
 	delete(s.declined, callID)
+}
+
+// endedChannel returns the channel closed when a call is torn down.
+func (s *Subsystem) endedChannel(callID string) chan struct{} {
+	s.endedMu.Lock()
+	defer s.endedMu.Unlock()
+	ch, ok := s.ended[callID]
+	if !ok {
+		ch = make(chan struct{})
+		s.ended[callID] = ch
+	}
+	return ch
+}
+
+func (s *Subsystem) forgetEndedChannel(callID string) {
+	s.endedMu.Lock()
+	defer s.endedMu.Unlock()
+	delete(s.ended, callID)
+}
+
+func (s *Subsystem) signalEnded(callID string) {
+	s.endedMu.Lock()
+	defer s.endedMu.Unlock()
+	ch, ok := s.ended[callID]
+	if !ok {
+		return
+	}
+	select {
+	case <-ch:
+	default:
+		close(ch)
+	}
 }
 
 func (s *Subsystem) rememberNotification(notify id.EventID, callID string) {
@@ -486,22 +634,30 @@ func (s *Subsystem) signalAnswer(callID string) {
 // on a cancelled context would leave the membership pinned in the room, which
 // is exactly the failure this function exists to prevent.
 func (s *Subsystem) endCall(ctx context.Context, call *database.Call) error {
-	if call.State == database.StateEnded {
-		return nil
-	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
+	// The compare-and-swap is the whole of the idempotence: a duplicate leave
+	// event, a ring timeout and a watcher tick can all reach here for the same
+	// call, and only the one that actually moved the row tears it down.
+	mine, err := s.db.Call.End(ctx, call)
+	if err != nil {
+		return err
+	}
+	if !mine {
+		return nil
+	}
 	s.forgetSeen(call.CallID)
 	s.forgetNotification(call.CallID)
-	s.signalAnswer(call.CallID)
+	s.signalEnded(call.CallID)
+	// livekit-sip holds the SIP leg into the conference for as long as its
+	// participant exists, and nothing else removes it. Skipping this on the
+	// decline and timeout paths left the conference up indefinitely, which
+	// also blocks the next call to the same number.
+	s.removeParticipant(ctx, call, s.log.With().Str("call_id", call.CallID).Logger())
 	if leg := s.takeLeg(call.CallID); leg != nil {
 		if err := leg.Hangup(ctx); err != nil {
 			s.log.Debug().Err(err).Str("call_id", call.CallID).Msg("Control leg was already gone")
 		}
-	}
-	call.State = database.StateEnded
-	if err := s.db.Call.Update(ctx, call); err != nil {
-		return err
 	}
 	return s.retractGhostMembership(ctx, call)
 }
@@ -608,7 +764,7 @@ func (s *Subsystem) handleCallMember(ctx context.Context, evt *event.Event) {
 	if err != nil || portal == nil {
 		return
 	}
-	content, active, err := ParseCallMember(evt.Content.VeryRaw)
+	content, active, err := ParseCallMember(evt.Content.VeryRaw, time.UnixMilli(evt.Timestamp))
 	if err != nil {
 		s.log.Warn().Err(err).
 			Stringer("event_id", evt.ID).
@@ -664,7 +820,7 @@ func (s *Subsystem) handleRtcDecline(ctx context.Context, evt *event.Event) {
 // request to place one.
 func (s *Subsystem) onMatrixJoinedCall(ctx context.Context, portal *bridgev2.Portal, content *CallMemberContent, log zerolog.Logger) error {
 	portalID := string(portal.ID)
-	call, err := s.db.Call.GetActiveByPortal(ctx, portalID)
+	call, err := s.activeCallByPortal(ctx, portalID)
 	if err != nil {
 		return fmt.Errorf("look up call: %w", err)
 	}
@@ -687,16 +843,15 @@ func (s *Subsystem) onMatrixJoinedCall(ctx context.Context, portal *bridgev2.Por
 // already ended is normal, because clients retract their membership after the
 // far end hangs up.
 func (s *Subsystem) onMatrixLeftCall(ctx context.Context, portal *bridgev2.Portal, log zerolog.Logger) {
-	call, err := s.db.Call.GetActiveByPortal(ctx, string(portal.ID))
+	call, err := s.activeCallByPortal(ctx, string(portal.ID))
 	if err != nil || call == nil {
 		return
 	}
 	log.Info().Str("call_id", call.CallID).Msg("Matrix side left the call, hanging up")
-	// The bridge has no channel of its own to hang up any more. Removing the
-	// LiveKit participant drops livekit-sip's leg out of the conference, which
-	// ends the call only if the conference is configured to end when that leg
-	// leaves. See the SIP server contract in the README.
-	s.removeParticipant(ctx, call, log)
+	// The bridge has no channel of its own to hang up any more. endCall
+	// removes the LiveKit participant, which drops livekit-sip's leg out of
+	// the conference; that ends the call only if the conference is configured
+	// to end when that leg leaves. See the SIP server contract in the README.
 	if err := s.endCall(ctx, call); err != nil {
 		log.Warn().Err(err).Msg("Failed to end call")
 	}
@@ -756,7 +911,7 @@ func (s *Subsystem) Dial(ctx context.Context, portal *bridgev2.Portal) (*databas
 	if portal.MXID == "" {
 		return nil, fmt.Errorf("portal %s has no Matrix room", portalID)
 	}
-	if existing, err := s.db.Call.GetActiveByPortal(ctx, portalID); err != nil {
+	if existing, err := s.activeCallByPortal(ctx, portalID); err != nil {
 		return nil, err
 	} else if existing != nil {
 		return existing, nil

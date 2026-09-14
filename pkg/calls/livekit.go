@@ -21,6 +21,14 @@ type LiveKitConfig struct {
 	APISecret string        `yaml:"api_secret"`
 	Timeout   time.Duration `yaml:"timeout"`
 
+	// JWTServiceURL is the public MatrixRTC focus (lk-jwt-service) URL that
+	// Matrix clients use to get a LiveKit token. The bridge never calls it,
+	// but it has to publish it: foci_preferred entries without it do not
+	// deserialize in matrix-rust-sdk, and with focus_selection
+	// "oldest_membership" the bridge's membership is usually the oldest, so
+	// this is the focus the other participants will take.
+	JWTServiceURL string `yaml:"jwt_service_url"`
+
 	// TrunkName identifies the outbound trunk object the bridge reconciles.
 	TrunkName string `yaml:"trunk_name"`
 	// TrunkAddress is the SIP host livekit-sip dials to reach the conference.

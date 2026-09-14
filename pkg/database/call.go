@@ -80,11 +80,26 @@ const (
 		INSERT INTO sip_call (` + callColumns + `)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`
+	// The state guard is what stops a late writer from resurrecting a call
+	// that has already been torn down. Every terminal path goes through
+	// End, and nothing may write a row back out of that state.
 	updateCallQuery = `
 		UPDATE sip_call
 		SET conference = $2, lk_room = $3, lk_identity = $4,
 		    lk_participant = $5, state = $6, updated_at = $7
-		WHERE call_id = $1
+		WHERE call_id = $1 AND state <> 'ended'
+	`
+	// transitionCallQuery and endCallQuery are the only state changes. Both
+	// are compare-and-swap, so exactly one caller owns each transition of a
+	// call even when a leave event, a ring timeout and a watcher tick all
+	// arrive at once.
+	transitionCallQuery = `
+		UPDATE sip_call SET state = $3, updated_at = $4
+		WHERE call_id = $1 AND state = $2
+	`
+	endCallQuery = `
+		UPDATE sip_call SET state = 'ended', updated_at = $2
+		WHERE call_id = $1 AND state <> 'ended'
 	`
 	// An "active" call is anything not yet ended. There is at most one per
 	// number, so ordering by created_at only matters if state got out of sync.
@@ -143,6 +158,37 @@ func (cq *CallQuery) Update(ctx context.Context, c *Call) error {
 	return cq.Exec(ctx, updateCallQuery,
 		c.CallID, c.Conference, c.LKRoom, c.LKIdentity,
 		c.LKParticipant, c.State, c.UpdatedAt.UnixMilli())
+}
+
+// Transition moves a call between two states and reports whether this caller
+// is the one that did it. A false return is not an error: it means another
+// path got there first, and this one must not act.
+func (cq *CallQuery) Transition(ctx context.Context, c *Call, from, to CallState) (bool, error) {
+	return cq.swap(ctx, c, to, transitionCallQuery, c.CallID, from, to)
+}
+
+// End marks a call ended from whatever state it is in, and reports whether
+// this caller is the one that ended it. Teardown runs only for the winner.
+func (cq *CallQuery) End(ctx context.Context, c *Call) (bool, error) {
+	return cq.swap(ctx, c, StateEnded, endCallQuery, c.CallID)
+}
+
+func (cq *CallQuery) swap(ctx context.Context, c *Call, to CallState, query string, args ...any) (bool, error) {
+	now := time.Now()
+	res, err := cq.GetDB().Exec(ctx, query, append(args, now.UnixMilli())...)
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if rows == 0 {
+		return false, nil
+	}
+	c.State = to
+	c.UpdatedAt = now
+	return true, nil
 }
 
 // GetActiveByPortal returns the call in progress for a number, or nil.

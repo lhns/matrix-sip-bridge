@@ -54,7 +54,8 @@ type CallMemberContent struct {
 	Application  string `json:"application,omitempty"`
 	CallID       string `json:"call_id,omitempty"`
 	DeviceID     string `json:"device_id,omitempty"`
-	ExpiresTS    int64  `json:"expires,omitempty"`
+	CreatedTS    int64  `json:"created_ts,omitempty"`
+	ExpiresMS    int64  `json:"expires,omitempty"`
 	MembershipID string `json:"membershipID,omitempty"`
 
 	// Legacy (array) form.
@@ -64,7 +65,8 @@ type CallMemberContent struct {
 // CallMembership is one entry of the legacy memberships array.
 type CallMembership struct {
 	DeviceID     string `json:"device_id,omitempty"`
-	ExpiresTS    int64  `json:"expires,omitempty"`
+	CreatedTS    int64  `json:"created_ts,omitempty"`
+	ExpiresMS    int64  `json:"expires,omitempty"`
 	MembershipID string `json:"membershipID,omitempty"`
 }
 
@@ -74,7 +76,10 @@ type CallMembership struct {
 // state deletion, so the redaction-equivalent is state with no fields. The
 // second return value reports whether the event describes an active
 // membership, which is the signal the bridge acts on.
-func ParseCallMember(raw json.RawMessage) (*CallMemberContent, bool, error) {
+//
+// origin is the event's own timestamp, needed because "expires" is measured
+// from when the membership was created and clients do not all send created_ts.
+func ParseCallMember(raw json.RawMessage, origin time.Time) (*CallMemberContent, bool, error) {
 	var c CallMemberContent
 	if len(raw) == 0 {
 		return &c, false, nil
@@ -82,18 +87,18 @@ func ParseCallMember(raw json.RawMessage) (*CallMemberContent, bool, error) {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return nil, false, err
 	}
-	return &c, c.IsActive(time.Now()), nil
+	return &c, c.IsActive(time.Now(), origin), nil
 }
 
 // IsActive reports whether the content describes a live membership.
 //
-// A membership that has passed its "expires" timestamp is treated as gone: a
-// client that crashes never sends the empty-content leave event, and acting on
-// a stale membership would place a call to a phone nobody is waiting on.
-func (c *CallMemberContent) IsActive(now time.Time) bool {
+// A membership past its expiry is treated as gone: a client that crashes never
+// sends the empty-content leave event, and acting on a stale membership would
+// place a call to a phone nobody is waiting on.
+func (c *CallMemberContent) IsActive(now, origin time.Time) bool {
 	if len(c.Memberships) > 0 {
 		for _, m := range c.Memberships {
-			if !expired(m.ExpiresTS, now) {
+			if !expired(m.CreatedTS, m.ExpiresMS, now, origin) {
 				return true
 			}
 		}
@@ -104,17 +109,31 @@ func (c *CallMemberContent) IsActive(now time.Time) bool {
 	if c.DeviceID == "" && c.CallID == "" && c.Application == "" {
 		return false
 	}
-	return !expired(c.ExpiresTS, now)
+	return !expired(c.CreatedTS, c.ExpiresMS, now, origin)
 }
 
-// expired reports whether a millisecond timestamp is in the past. A zero or
-// negative value means the client did not set an expiry, which is not the same
-// as having expired.
-func expired(expiresMS int64, now time.Time) bool {
+// expired reports whether a membership has lapsed.
+//
+// "expires" is a DURATION in milliseconds from when the membership was
+// created, not a deadline. Reading it as a Unix timestamp turns every real
+// client's four-hour join into a 1970 date, i.e. into a leave, and the bridge
+// hangs up on the user in the act of answering. The base is created_ts when
+// the client sends one and the event's own timestamp otherwise.
+//
+// A zero or negative duration means the client set no expiry, which is not the
+// same as having expired.
+func expired(createdTS, expiresMS int64, now, origin time.Time) bool {
 	if expiresMS <= 0 {
 		return false
 	}
-	return time.UnixMilli(expiresMS).Before(now)
+	base := origin
+	if createdTS > 0 {
+		base = time.UnixMilli(createdTS)
+	}
+	if base.IsZero() {
+		return false
+	}
+	return base.Add(time.Duration(expiresMS) * time.Millisecond).Before(now)
 }
 
 // FirstDeviceID returns the device ID of the membership, from whichever of the

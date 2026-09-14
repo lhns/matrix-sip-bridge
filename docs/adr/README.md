@@ -11,5 +11,6 @@
 | [0007](0007-xmpp-path-in-the-asterisk-gateway-is-kept.md) | The XMPP path in the existing Asterisk gateway is kept | Superseded by 0009 |
 | [0008](0008-the-bridge-is-a-sip-endpoint.md) | The bridge is a SIP endpoint, not a manager client | Accepted |
 | [0009](0009-the-sip-server-is-configured-for-the-bridge.md) | The SIP server is configured for the bridge | Accepted |
-| [0010](0010-element-call-filters-audio-by-rtc-membership.md) | Element Call filters audio by RTC membership | Accepted |
+| [0010](0010-element-call-filters-audio-by-rtc-membership.md) | Element Call filters audio by RTC membership | Amended by 0012 |
 | [0011](0011-ringing-is-a-notification-the-portal-must-permit.md) | Ringing is a separate notification, and the portal must permit RTC membership | Accepted |
+| [0012](0012-the-rtc-membership-must-be-usable-by-the-client.md) | The RTC membership must be usable by the client that reads it | Accepted |

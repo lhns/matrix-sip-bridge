@@ -43,15 +43,19 @@ func (s *Subsystem) publishGhostMembership(ctx context.Context, call *database.C
 	}
 	userID := ghost.Intent.GetMXID()
 	deviceID := deviceIDFor(call.CallID)
-	membershipID := call.CallID
+	membershipID := MemberIDFor(s.cfg.IdentityScheme, userID.String(), deviceID, call.CallID)
 
-	call.LKIdentity = LiveKitIdentity(userID.String(), deviceID, membershipID)
+	// The identity handed to CreateSIPParticipant and the member ID published
+	// here are derived together on purpose: a disagreement between the two is
+	// the same silent-audio bug as picking the wrong scheme.
+	call.LKIdentity = ParticipantIdentityFor(s.cfg.IdentityScheme, userID.String(), deviceID, membershipID)
 	if err := s.db.Call.Update(ctx, call); err != nil {
 		return "", err
 	}
 	s.warnIfEncrypted(ctx, ghost, call.RoomID)
 	stateKey := s.stateKeyFor(ctx, ghost, call.RoomID, userID, deviceID)
-	content := ghostMembership(userID, deviceID, membershipID, s.cfg.MembershipExpiry)
+	content := ghostMembership(userID, call.RoomID, deviceID, membershipID,
+		s.cfg.LiveKit.JWTServiceURL, s.cfg.MembershipExpiry)
 	resp, err := ghost.Intent.SendState(ctx, call.RoomID, CallMemberEventType, stateKey, content, time.Time{})
 	if err != nil {
 		return "", err
@@ -202,7 +206,7 @@ func supportsOwnedStateKeys(version id.RoomVersion) bool {
 // LiveKit participant identity: Element Call filters audio tracks to the
 // identities its membership list derives, and an unmatched participant is
 // inaudible as well as invisible. See ADR-0010.
-func ghostMembership(userID id.UserID, deviceID, membershipID string, expiry time.Duration) *event.Content {
+func ghostMembership(userID id.UserID, roomID id.RoomID, deviceID, membershipID, jwtServiceURL string, expiry time.Duration) *event.Content {
 	now := time.Now()
 	return &event.Content{Raw: map[string]any{
 		"member": map[string]any{
@@ -220,9 +224,26 @@ func ghostMembership(userID id.UserID, deviceID, membershipID string, expiry tim
 		"device_id":    deviceID,
 		"membershipID": membershipID,
 		"created_ts":   now.UnixMilli(),
-		"expires":      now.Add(expiry).UnixMilli(),
+		// A duration relative to created_ts, not a deadline. Writing an
+		// absolute timestamp here parses as a duration of forty thousand
+		// years, which is not the harmless mistake it looks like: see
+		// membershipExpiry.
+		"expires":       expiry.Milliseconds(),
+		"m.call.intent": "audio",
+		// focus_active and the two livekit_* fields are mandatory in the
+		// receiving parsers. A membership missing any of them is dropped
+		// whole, the client then believes the room has no active call, and it
+		// neither rings nor renders the caller. Nothing reports the failure.
+		"focus_active": map[string]any{
+			"type":            "livekit",
+			"focus_selection": "oldest_membership",
+		},
 		"foci_preferred": []any{
-			map[string]any{"type": "livekit"},
+			map[string]any{
+				"type":                "livekit",
+				"livekit_alias":       roomID.String(),
+				"livekit_service_url": jwtServiceURL,
+			},
 		},
 	}}
 }

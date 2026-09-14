@@ -76,11 +76,23 @@ calls:
     # is also the worst-case delay before a finished call is cleaned up.
     participant_poll_interval: 10s
 
+    # How the caller ghost's LiveKit participant identity is derived. It must
+    # match what the Element Call build your clients run derives for itself:
+    #   user_device -- "<user id>:<device id>", used verbatim
+    #   hashed      -- the MSC4195 hash of user, device and member IDs
+    # Getting it wrong gives a call that connects, reports every track
+    # subscribed and healthy, and is silent. See docs/adr/0012.
+    identity_scheme: user_device
+
     livekit:
         url: https://livekit.example.com
         api_key: ""
         api_secret: ""
         timeout: 30s
+        # The MatrixRTC focus Matrix clients use, i.e. lk-jwt-service. The
+        # bridge never calls it; it publishes it in the caller ghost's RTC
+        # membership, and a membership without it is discarded by clients.
+        jwt_service_url: https://matrix-rtc.example.com/livekit/jwt
 
         # livekit-sip needs an outbound trunk object to dial through. It lives
         # in Redis and is lost on a Redis restart, so the bridge recreates it

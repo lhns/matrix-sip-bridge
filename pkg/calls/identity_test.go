@@ -3,6 +3,8 @@ package calls
 import (
 	"strings"
 	"testing"
+
+	"github.com/rs/zerolog"
 )
 
 // The two vectors below come from the MSC4195 appendix and are cross-checked
@@ -103,5 +105,62 @@ func TestMarshalStrings(t *testing.T) {
 				t.Errorf("marshalStrings(%q) = %s, want %s", tt.parts, got, tt.want)
 			}
 		})
+	}
+}
+
+// The identity the bridge hands to CreateSIPParticipant and the member ID it
+// publishes in the RTC membership are two halves of one value. Element Call
+// derives the identities it will accept from the membership list and discards
+// every track it cannot match, so a disagreement here is a call that connects,
+// reports every track subscribed and healthy, and is silent.
+func TestParticipantIdentityMatchesTheMemberID(t *testing.T) {
+	const (
+		user   = "@sip_15551234567:example.com"
+		device = "SIPABCD"
+		opaque = "0123456789abcdef"
+	)
+	tests := []struct {
+		scheme   IdentityScheme
+		memberID string
+		identity string
+	}{
+		{
+			scheme:   IdentityUserDevice,
+			memberID: user + ":" + device,
+			identity: user + ":" + device,
+		},
+		{
+			scheme:   IdentityHashed,
+			memberID: opaque,
+			identity: LiveKitIdentity(user, device, opaque),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.scheme), func(t *testing.T) {
+			memberID := MemberIDFor(tt.scheme, user, device, opaque)
+			if memberID != tt.memberID {
+				t.Errorf("MemberIDFor = %q, want %q", memberID, tt.memberID)
+			}
+			identity := ParticipantIdentityFor(tt.scheme, user, device, memberID)
+			if identity != tt.identity {
+				t.Errorf("ParticipantIdentityFor = %q, want %q", identity, tt.identity)
+			}
+		})
+	}
+}
+
+// The scheme a deployment needs cannot be guessed from the room, so it is
+// configured. This pins which one an unconfigured bridge emits.
+func TestDefaultIdentitySchemeIsUserDevice(t *testing.T) {
+	s := New(Config{}, nil, "", nil, nil, zerolog.Nop())
+	if s.cfg.IdentityScheme != IdentityUserDevice {
+		t.Errorf("default identity scheme = %q, want %q", s.cfg.IdentityScheme, IdentityUserDevice)
+	}
+	// The unhashed identity must be the member ID verbatim: it is compared as
+	// a string by every other participant, not re-derived.
+	const user, device = "@sip_15551234567:example.com", "SIPABCD"
+	memberID := MemberIDFor(s.cfg.IdentityScheme, user, device, "ignored")
+	if got := ParticipantIdentityFor(s.cfg.IdentityScheme, user, device, memberID); got != memberID {
+		t.Errorf("identity %q is not the member ID %q", got, memberID)
 	}
 }

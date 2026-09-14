@@ -309,7 +309,7 @@ pkg/calls/                 the call subsystem, independent of bridgev2 plumbing
   membership.go              publishing the ghost RTC membership and the ring
   rtc.go                     MSC3401 call.member parsing
   notification.go            MSC4075 ring notification, MSC4310 decline
-  identity.go                MSC4195 LiveKit room-name and identity derivation
+  identity.go                LiveKit room-name and participant-identity derivation
   livekit.go                 twirp JSON client for the LiveKit SIP and room APIs
   trunk.go                   outbound-trunk reconciliation (Redis loses it)
 pkg/phonenum/              E.164 normalisation and portal-ID round trips
@@ -345,9 +345,16 @@ See [docs/adr](docs/adr/README.md) for the numbered index. The ones worth
 reading before changing anything: [0008](docs/adr/0008-the-bridge-is-a-sip-endpoint.md)
 on why the bridge speaks SIP and what the control leg is,
 [0010](docs/adr/0010-element-call-filters-audio-by-rtc-membership.md) on why a
-call membership is mandatory and why encryption breaks calls silently, and
+call membership is mandatory and why encryption breaks calls silently,
+[0012](docs/adr/0012-the-rtc-membership-must-be-usable-by-the-client.md) on
+what has to be in that membership and which participant-identity scheme to
+configure, and
 [0005](docs/adr/0005-calls-bridged-as-media-via-livekit-sip.md) on the LiveKit
 room-name derivation the bridge must reproduce exactly.
+
+If a call connects and nobody can hear the caller, read 0012 first: both
+participants in the same LiveKit room with packets flowing and zero loss is
+what a mismatched participant identity looks like from the server side.
 
 ## License
 
