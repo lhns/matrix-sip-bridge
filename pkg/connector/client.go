@@ -34,7 +34,10 @@ var (
 
 // Connect reports the SIP endpoint's state to Matrix. The endpoint itself is
 // owned by the connector, not by the login, because it is shared.
-func (sc *SIPClient) Connect(_ context.Context) {
+func (sc *SIPClient) Connect(ctx context.Context) {
+	// The startup context is cancelled once Connect returns, and the resync
+	// outlives it.
+	go sc.resyncPortals(context.WithoutCancel(ctx))
 	if sc.conn.sipReady() {
 		sc.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 		return
@@ -43,6 +46,30 @@ func (sc *SIPClient) Connect(_ context.Context) {
 		StateEvent: status.StateConnecting,
 		Message:    "Starting the SIP endpoint",
 	})
+}
+
+// resyncPortals re-reads the chat info of every portal that already has a room.
+//
+// A portal's room type is only ever set from GetChatInfo, and nothing else in
+// this bridge asks for it again after the room exists. Without this, a portal
+// created before the bridge described itself as a DM stays a group room --
+// and its calls stay group calls -- forever.
+func (sc *SIPClient) resyncPortals(ctx context.Context) {
+	br := sc.UserLogin.Bridge
+	portals, err := br.GetAllPortalsWithMXID(ctx)
+	if err != nil {
+		br.Log.Warn().Err(err).Msg("Could not list portals to resync; existing rooms keep their old room type")
+		return
+	}
+	for _, portal := range portals {
+		br.QueueRemoteEvent(sc.UserLogin, &simplevent.ChatResync{
+			EventMeta: simplevent.EventMeta{
+				Type:      bridgev2.RemoteEventChatResync,
+				PortalKey: portal.PortalKey,
+			},
+			GetChatInfoFunc: sc.GetChatInfo,
+		})
+	}
 }
 
 func (sc *SIPClient) Disconnect() {}
@@ -66,12 +93,21 @@ func (sc *SIPClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (*b
 	number := phonenum.FromID(string(portal.ID))
 	return &bridgev2.ChatInfo{
 		Name: ptr.Ptr(number),
+		// A portal is one phone number and is inherently two-party. The room
+		// type is what puts is_direct on the invite and the room in the user's
+		// m.direct; a client that reads neither treats every call in it as a
+		// group call.
+		Type: ptr.Ptr(database.RoomTypeDM),
 		Members: &bridgev2.ChatMemberList{
 			// Not full, and saying otherwise kicks people. A portal's Matrix
 			// side has members the SIP side knows nothing about -- the owning
 			// user above all -- and bridgev2 removes every joined member a
 			// full list omits, with the reason "User is not in remote chat".
 			IsFull: false,
+			// Names the DM partner outright. The alternative bridgev2 offers
+			// is inferring it from a two-entry member list, which requires
+			// IsFull.
+			OtherUserID: networkid.UserID(portal.ID),
 			Members: []bridgev2.ChatMember{{
 				EventSender: bridgev2.EventSender{Sender: networkid.UserID(portal.ID)},
 				Membership:  event.MembershipJoin,

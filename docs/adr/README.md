@@ -14,3 +14,4 @@
 | [0010](0010-element-call-filters-audio-by-rtc-membership.md) | Element Call filters audio by RTC membership | Amended by 0012 |
 | [0011](0011-ringing-is-a-notification-the-portal-must-permit.md) | Ringing is a separate notification, and the portal must permit RTC membership | Accepted |
 | [0012](0012-the-rtc-membership-must-be-usable-by-the-client.md) | The RTC membership must be usable by the client that reads it | Accepted |
+| [0013](0013-a-portal-is-a-direct-chat.md) | A portal is a direct chat | Accepted |

@@ -155,3 +155,27 @@ func TestChatInfoDoesNotClaimAFullMemberList(t *testing.T) {
 		t.Error("the member list must not be marked full")
 	}
 }
+
+// A portal is one phone number and two parties. Without the DM room type
+// bridgev2 creates the room with is_direct unset and never puts it in the
+// user's m.direct, and the call presents as a group call.
+func TestChatInfoIsADirectChat(t *testing.T) {
+	sc := &SIPClient{}
+	info, err := sc.GetChatInfo(context.Background(), &bridgev2.Portal{
+		Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: "15551234567"}},
+	})
+	if err != nil {
+		t.Fatalf("GetChatInfo: %v", err)
+	}
+	if info.Type == nil || *info.Type != database.RoomTypeDM {
+		t.Errorf("room type = %v, want %q", info.Type, database.RoomTypeDM)
+	}
+	// Without this bridgev2 can only find the DM partner in a member list
+	// marked full, which is the thing that kicks the Matrix user.
+	if info.Members.OtherUserID != networkid.UserID("15551234567") {
+		t.Errorf("other user = %q, want the portal's number", info.Members.OtherUserID)
+	}
+	if info.Members.IsFull {
+		t.Error("the member list must not be marked full")
+	}
+}
