@@ -94,6 +94,11 @@ type Subsystem struct {
 	db  *database.Database
 	log zerolog.Logger
 
+	// loginID names the bridge's one static UserLogin. Every portal bridgev2
+	// creates needs it as the source; there is no per-user login to take it
+	// from.
+	loginID networkid.UserLoginID
+
 	trunkID atomic.Pointer[string]
 
 	// answered carries the "a Matrix user joined" signal from the call.member
@@ -114,7 +119,7 @@ type Subsystem struct {
 }
 
 // New builds the subsystem. Start does the work.
-func New(cfg Config, br *bridgev2.Bridge, sip Telephony, db *database.Database, log zerolog.Logger) *Subsystem {
+func New(cfg Config, br *bridgev2.Bridge, loginID networkid.UserLoginID, sip Telephony, db *database.Database, log zerolog.Logger) *Subsystem {
 	if cfg.MembershipExpiry <= 0 {
 		cfg.MembershipExpiry = 6 * time.Hour
 	}
@@ -127,6 +132,7 @@ func New(cfg Config, br *bridgev2.Bridge, sip Telephony, db *database.Database, 
 	return &Subsystem{
 		cfg:      cfg,
 		br:       br,
+		loginID:  loginID,
 		sip:      sip,
 		lk:       NewLiveKitClient(cfg.LiveKit),
 		db:       db,
@@ -434,11 +440,32 @@ func (s *Subsystem) portalForNumber(ctx context.Context, portalID string) (*brid
 		return nil, fmt.Errorf("get portal %s: %w", portalID, err)
 	}
 	if portal.MXID == "" {
-		if err := portal.CreateMatrixRoom(ctx, nil, nil); err != nil {
+		source, err := s.sourceLogin()
+		if err != nil {
+			return nil, err
+		}
+		// The room info is left to bridgev2, which asks the login's
+		// GetChatInfo for it. That is the same call the inbound SMS path makes
+		// through QueueRemoteEvent, so both paths land on one portal per
+		// number rather than two descriptions of it that can drift.
+		if err := portal.CreateMatrixRoom(ctx, source, nil); err != nil {
 			return nil, fmt.Errorf("create room for %s: %w", portalID, err)
 		}
 	}
 	return portal, nil
+}
+
+// sourceLogin returns the login every portal is created on behalf of.
+//
+// bridgev2 dereferences the source unconditionally while creating a room, so a
+// call arriving before anyone has logged in has to fail here rather than panic
+// inside the portal machinery.
+func (s *Subsystem) sourceLogin() (*bridgev2.UserLogin, error) {
+	login := s.br.GetCachedUserLoginByID(s.loginID)
+	if login == nil {
+		return nil, fmt.Errorf("no %q login yet; nobody has logged in", s.loginID)
+	}
+	return login, nil
 }
 
 // handleCallMember reacts to a Matrix user joining or leaving the RTC session

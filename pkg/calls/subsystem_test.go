@@ -1,6 +1,17 @@
 package calls
 
-import "testing"
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"maunium.net/go/mautrix/bridgev2"
+)
 
 func TestConferenceNameRoundTrip(t *testing.T) {
 	tests := []struct {
@@ -110,5 +121,96 @@ func TestCurrentTrunkIDBeforeReconcile(t *testing.T) {
 	got, err := s.currentTrunkID()
 	if err != nil || got != id {
 		t.Errorf("currentTrunkID() = %q, %v; want %q, nil", got, err, id)
+	}
+}
+
+// bridgev2 dereferences the source UserLogin unconditionally while creating a
+// room, so a call that arrives before anyone has logged in must be refused
+// here. Without this the bridge panicked inside portal creation on the first
+// inbound call.
+func TestPortalCreationNeedsTheStaticLogin(t *testing.T) {
+	s := &Subsystem{br: &bridgev2.Bridge{}, loginID: "sip"}
+	login, err := s.sourceLogin()
+	if err == nil {
+		t.Fatalf("sourceLogin() = %v, want an error when no login is cached", login)
+	}
+	if login != nil {
+		t.Errorf("sourceLogin() returned %v alongside an error", login)
+	}
+	if !strings.Contains(err.Error(), "sip") {
+		t.Errorf("err = %v, want it to name the login", err)
+	}
+}
+
+// sourceArgument is the position of the *bridgev2.UserLogin in the bridgev2
+// entry points that take one. Passing nil there is a panic, not an error.
+var sourceArgument = map[string]int{
+	"CreateMatrixRoom": 1,
+	"QueueRemoteEvent": 0,
+}
+
+func TestNoBridgev2CallPassesANilSource(t *testing.T) {
+	root := moduleRoot(t)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(d.Name()) != ".go" {
+			return nil
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			arg, ok := sourceArgument[sel.Sel.Name]
+			if !ok || arg >= len(call.Args) {
+				return true
+			}
+			if id, ok := call.Args[arg].(*ast.Ident); ok && id.Name == "nil" {
+				t.Errorf("%s:%d passes a nil source to %s; bridgev2 dereferences it",
+					rel, fset.Position(call.Pos()).Line, sel.Sel.Name)
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the repository: %v", err)
+	}
+}
+
+// moduleRoot walks up from the test's directory to the module root.
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("could not find the module root")
+		}
+		dir = parent
 	}
 }

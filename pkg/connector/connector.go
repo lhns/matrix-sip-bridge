@@ -65,7 +65,8 @@ func (sc *SIPConnector) Start(ctx context.Context) error {
 	}
 	sc.sip = sip
 	sc.calls = calls.New(
-		sc.Config.Calls, sc.br, sipTelephony{sip, sc.Config.SIP.ConferenceHeader}, sc.db,
+		sc.Config.Calls, sc.br, networkid.UserLoginID(LoginID),
+		sipTelephony{sip, sc.Config.SIP.ConferenceHeader}, sc.db,
 		sc.br.Log.With().Str("component", "calls").Logger(),
 	)
 
