@@ -119,7 +119,29 @@ user hanging up leaves the caller alone in a conference.
 
 In the other direction, the bridge notices that a call ended by polling LiveKit
 for that participant every `calls.participant_poll_interval` (10s by default),
-so a finished call is cleaned up within about that long.
+so a finished call is cleaned up within about that long. That is the only
+end-of-call signal there is, so **the SIP side must drop livekit-sip's leg when
+the far end hangs up**, or nothing ever ends the Matrix call: the ghost stays in
+the RTC session and the client keeps the call open until the membership expires
+hours later.
+
+`end_marked` does not do this. It fires only when the *last marked* user leaves,
+and livekit-sip is the only marked user, so it covers the Matrix-hangs-up
+direction and nothing else. Making both legs marked does not help either — the
+count never reaches zero while one of them is still there. Asterisk 16.19 / 18.5
+added `end_marked_any` for exactly this; below that the dialplan has to end the
+conference itself when the far end's channel goes away, e.g. from the `h`
+extension:
+
+```
+exten => h,1,System(asterisk -rx "confbridge kick ${CONF} all")
+```
+
+A hangup while an outbound call is still ringing is the same problem one step
+earlier. The bridge CANCELs its INVITE, but `Originate()` does not watch the
+channel that called it: it runs to completion and the callee lands alone in the
+conference. The dialplan must notice its own channel is gone — `check_hangup()`
+in pbx_lua, `${CHANNEL(state)}` otherwise — and tear the conference down.
 
 ### SIP MESSAGE
 
@@ -156,6 +178,9 @@ exten => _+X.,1,Set(CONF=sip-${FILTER(0-9,${EXTEN})})
  same => n,Hangup()
  same => n(conf),ConfBridge(${CONF},default_bridge,matrix_caller)
  same => n,Hangup()
+; Same as [matrix-conf] below: the caller hanging up has to end the conference,
+; because end_marked only fires when the marked user (livekit-sip) leaves.
+exten => h,1,System(asterisk -rx "confbridge kick ${CONF} all")
 
 ; Runs on whichever leg answered. CONTINUE hangs that leg up and lets the
 ; caller carry on in the dialplan instead of being bridged to it.
@@ -176,9 +201,15 @@ exten => _+X.,1,Answer()
  same => n,Set(CONF=${SIP_HEADER(X-Conference)})
  same => n,Originate(SIP/trunk/${EXTEN},exten,matrix-conf,${CONF},1,,a)
  same => n,Hangup()
+; Originate() does not watch this channel, so a CANCEL while the phone rang
+; leaves the callee alone in the conference. The hangup extension clears it out.
+exten => h,1,System(asterisk -rx "confbridge kick ${CONF} all")
 
 [matrix-conf]
 exten => _sip-X.,1,ConfBridge(${EXTEN},default_bridge,matrix_caller)
+; The far end hanging up must end livekit-sip's leg too; end_marked cannot,
+; because livekit-sip is the marked user. See "Ending a call".
+exten => h,1,System(asterisk -rx "confbridge kick ${EXTEN} all")
 
 ; ---- inbound text --------------------------------------------------------
 [messages-in]
@@ -187,7 +218,8 @@ exten => _.,1,MessageSend(sip:${EXTEN}@matrix-sip-bridge.example.com:5060,${MESS
 ```
 
 ```ini
-; confbridge.conf — the caller leaves when livekit-sip does.
+; confbridge.conf — the caller leaves when livekit-sip does. The other
+; direction is the dialplan's job; see "Ending a call".
 ;
 ; The option is "marked", not "marked_user". app_confbridge refuses to load the
 ; WHOLE FILE on a single unrecognised key, so one wrong name here does not

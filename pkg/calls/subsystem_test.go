@@ -1,6 +1,7 @@
 package calls
 
 import (
+	"context"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -313,4 +314,50 @@ func TestCallPowerLevelsApplied(t *testing.T) {
 	if callPowerLevelsApplied(partial) {
 		t.Error("a room granting only one of the membership event names is not repaired")
 	}
+}
+
+// The outbound INVITE blocks until the callee answers. A Matrix user hanging up
+// while the phone rings has no other way to reach it, and without the
+// cancellation the dialplan's Originate() runs to completion and the callee
+// lands alone in the conference.
+func TestInviteContextCancelsWhenTheCallEnds(t *testing.T) {
+	s := &Subsystem{ended: make(map[string]chan struct{})}
+	ctx, stop := s.inviteContext(context.Background(), "call-1")
+	defer stop()
+
+	select {
+	case <-ctx.Done():
+		t.Fatal("the INVITE was cancelled before the call ended")
+	default:
+	}
+
+	s.signalEnded("call-1")
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the INVITE was not cancelled when the call ended")
+	}
+}
+
+// stop runs on every outbound call, including the ones that connect, so it has
+// to release both the goroutine and the map entry. It is called from a defer as
+// well as inline, so calling it twice must not panic.
+func TestInviteContextStopReleasesTheCall(t *testing.T) {
+	s := &Subsystem{ended: make(map[string]chan struct{})}
+	ctx, stop := s.inviteContext(context.Background(), "call-1")
+	if len(s.ended) != 1 {
+		t.Fatalf("ended = %v, want one entry while the INVITE is out", s.ended)
+	}
+	stop()
+	stop()
+	if len(s.ended) != 0 {
+		t.Errorf("ended = %v, want it emptied once the INVITE is done", s.ended)
+	}
+	if ctx.Err() == nil {
+		t.Error("stop left the invite context live")
+	}
+	// A call that ends after the INVITE is done must not panic on a closed
+	// channel or find anything left to signal.
+	s.signalEnded("call-1")
 }

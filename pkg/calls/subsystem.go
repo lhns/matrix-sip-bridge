@@ -565,6 +565,40 @@ func (s *Subsystem) signalEnded(callID string) {
 	}
 }
 
+// ErrEndedWhileRinging reports an outbound call the Matrix side gave up on
+// before the phone was answered. It is the expected outcome of a hangup during
+// ringing, not a failure to place the call.
+var ErrEndedWhileRinging = errors.New("the call ended while the phone was ringing")
+
+// inviteContext returns a context cancelled when the call ends.
+//
+// The outbound INVITE blocks until the callee answers, and the bridge has no
+// other handle on it while it rings. Without this, a Matrix hangup during
+// ringing is recorded but never reaches the SIP server: the dialplan's
+// Originate() keeps going, the callee answers into a conference nobody is on,
+// and stays there until they hang up themselves.
+//
+// The returned stop function must be called once the INVITE is done or the
+// watching goroutine and the call's entry in s.ended both leak. It is safe to
+// call more than once.
+func (s *Subsystem) inviteContext(parent context.Context, callID string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	ended := s.endedChannel(callID)
+	stopped := make(chan struct{})
+	go func() {
+		select {
+		case <-ended:
+			cancel()
+		case <-stopped:
+		}
+	}()
+	return ctx, sync.OnceFunc(func() {
+		close(stopped)
+		cancel()
+		s.forgetEndedChannel(callID)
+	})
+}
+
 func (s *Subsystem) rememberNotification(notify id.EventID, callID string) {
 	s.declinedMu.Lock()
 	defer s.declinedMu.Unlock()
@@ -807,6 +841,13 @@ func (s *Subsystem) handleCallMember(ctx context.Context, evt *event.Event) {
 		return
 	}
 	if err := s.onMatrixJoinedCall(ctx, portal, content, log); err != nil {
+		// Giving up on a call while it rings is a user's decision, not a
+		// fault: logging it as an error trains the reader to skip the real
+		// ones.
+		if errors.Is(err, ErrEndedWhileRinging) {
+			log.Info().Msg("Matrix side hung up before the phone was answered")
+			return
+		}
 		log.Err(err).Msg("Failed to handle Matrix RTC join")
 	}
 }
@@ -972,20 +1013,43 @@ func (s *Subsystem) Dial(ctx context.Context, portal *bridgev2.Portal) (*databas
 	}
 
 	uri := strings.ReplaceAll(s.cfg.OutboundURI, "{number}", phonenum.FromID(portalID))
-	leg, err := s.sip.Invite(ctx, uri, conference)
+	// The INVITE does not return until the phone is answered, so a Matrix user
+	// hanging up while it rings has to reach it through the context: that is
+	// what turns the hangup into a CANCEL.
+	inviteCtx, stopInvite := s.inviteContext(ctx, call.CallID)
+	leg, err := s.sip.Invite(inviteCtx, uri, conference)
+	stopInvite()
 	if err != nil {
 		_ = s.endCall(ctx, call)
 		return nil, fmt.Errorf("invite %s: %w", uri, err)
 	}
 	s.keepLeg(call.CallID, leg)
 
+	// Winning this transition is what makes this path the owner of the call,
+	// the same compare-and-swap the inbound side does before it answers. A
+	// call the Matrix side gave up on while the phone rang is already ended,
+	// and bridging media into it now would leave livekit-sip and the callee
+	// alone in a conference until the callee hangs up.
+	mine, err := s.db.Call.Transition(ctx, call, database.StateRinging, database.StateBridged)
+	if err != nil {
+		_ = s.endCall(ctx, call)
+		return nil, fmt.Errorf("record the answered call: %w", err)
+	}
+	if !mine {
+		s.log.Info().Str("call_id", call.CallID).Str("portal_id", portalID).
+			Msg("Outbound call ended while the phone was still ringing")
+		if leg := s.takeLeg(call.CallID); leg != nil {
+			if err := leg.Hangup(ctx); err != nil {
+				s.log.Debug().Err(err).Str("call_id", call.CallID).
+					Msg("Control leg was already gone")
+			}
+		}
+		return nil, ErrEndedWhileRinging
+	}
+
 	if err := s.bridgeMedia(ctx, call); err != nil {
 		_ = s.endCall(ctx, call)
 		return nil, err
-	}
-	call.State = database.StateBridged
-	if err := s.db.Call.Update(ctx, call); err != nil {
-		s.log.Warn().Err(err).Str("call_id", call.CallID).Msg("Failed to record the outbound call")
 	}
 	s.log.Info().
 		Str("call_id", call.CallID).
