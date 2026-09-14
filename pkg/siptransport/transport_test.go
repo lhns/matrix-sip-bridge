@@ -406,3 +406,148 @@ func responseStatus(err error) int {
 	}
 	return 0
 }
+
+// The INVITE handler owns the call setup — a database lookup, the LiveKit
+// participant, the RTC membership — and all of it runs on the context this
+// package hands it. sipgo's sip.ServerTransactionContext returns a context
+// that is already cancelled, which killed every inbound call at its first
+// database query, so the context is checked at each step of a call that goes
+// all the way through to an answer.
+func TestInboundCallSetupRunsOnALiveContext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	type step struct {
+		name string
+		err  error
+	}
+	steps := make(chan step, 8)
+	joined := make(chan struct{})
+	setupDone := make(chan struct{})
+
+	tr, bridgeAddr := startBridge(t, ctx, nil)
+	tr.OnInvite(func(hctx context.Context, call *InboundCall) {
+		steps <- step{"handler entry", hctx.Err()}
+		// Stands in for the work beginInboundCall does before any SIP
+		// response goes out: the sip_call lookup and insert, the portal room,
+		// the ghost's RTC membership. It is the first thing the handler does,
+		// and it is where the real call died.
+		select {
+		case <-hctx.Done():
+		case <-time.After(50 * time.Millisecond):
+		}
+		steps <- step{"after call setup", hctx.Err()}
+		close(setupDone)
+
+		if err := call.Ringing(); err != nil {
+			t.Errorf("Ringing: %v", err)
+			return
+		}
+		steps <- step{"after 180", hctx.Err()}
+
+		<-joined
+		if err := call.Answer(); err != nil {
+			t.Errorf("Answer: %v", err)
+			return
+		}
+		steps <- step{"after 200", hctx.Err()}
+		close(steps)
+		<-call.Done()
+	})
+
+	peer := newFakePeer(t, ctx)
+	var ringingOnce sync.Once
+	dlg, provisional, err := peer.invite(ctx, bridgeAddr,
+		map[string]string{"X-Conference": "sip-15551234567"},
+		offerSDP("127.0.0.1", 40000),
+		func(res *sip.Response) {
+			if res.StatusCode == 180 {
+				ringingOnce.Do(func() { close(joined) })
+			}
+		})
+	if err != nil {
+		t.Fatalf("INVITE: %v", err)
+	}
+	defer func() { _ = dlg.Close() }()
+
+	select {
+	case <-setupDone:
+	case <-time.After(testTimeout):
+		t.Fatal("call setup never finished")
+	}
+	if len(provisional) == 0 || provisional[0].StatusCode != 180 {
+		t.Fatalf("expected a 180 Ringing, got %v", provisional)
+	}
+	if dlg.InviteResponse.StatusCode != 200 {
+		t.Fatalf("final response = %d, want 200", dlg.InviteResponse.StatusCode)
+	}
+	// The answer is not complete until the caller ACKs it, so this has to
+	// happen before the handler's last step is readable.
+	if err := dlg.Ack(ctx); err != nil {
+		t.Fatalf("ACK: %v", err)
+	}
+	for s := range steps {
+		if s.err != nil {
+			t.Errorf("context was %v at %q; call setup cannot use it", s.err, s.name)
+		}
+	}
+	// The dialplan hangs the control leg up right after the answer; the
+	// handler returning is what terminates the INVITE transaction.
+	if err := dlg.Bye(ctx); err != nil {
+		t.Fatalf("BYE: %v", err)
+	}
+}
+
+// A call the bridge cannot set up has to be refused with a definitive status.
+// Asterisk's parallel Dial() keeps ringing the other branches; a leg left
+// hanging would hold the caller on a bridge that is not there.
+func TestInboundCallSetupFailureIsRejectedDefinitively(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	legDone := make(chan struct{})
+	tr, bridgeAddr := startBridge(t, ctx, nil)
+	tr.OnInvite(func(hctx context.Context, call *InboundCall) {
+		// Stands in for beginInboundCall failing.
+		if err := call.Reject(500, "Server Internal Error"); err != nil {
+			t.Errorf("Reject: %v", err)
+		}
+		select {
+		case <-call.Done():
+			close(legDone)
+		case <-time.After(testTimeout):
+			t.Error("leg was not closed by the rejection")
+		}
+	})
+
+	peer := newFakePeer(t, ctx)
+	_, _, err := peer.invite(ctx, bridgeAddr,
+		map[string]string{"X-Conference": "sip-15551234567"},
+		offerSDP("127.0.0.1", 40000), nil)
+	if got := responseStatus(err); got != 500 {
+		t.Fatalf("err = %v (status %d), want a 500 response", err, got)
+	}
+	<-legDone
+}
+
+// The MESSAGE handler writes to the database and queues a Matrix event on the
+// context it is given, so it has the same requirement as the INVITE handler.
+func TestInboundMessageHandlerRunsOnALiveContext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	handlerErr := make(chan error, 1)
+	tr, bridgeAddr := startBridge(t, ctx, nil)
+	tr.OnMessage(func(hctx context.Context, msg InboundMessage) error {
+		handlerErr <- hctx.Err()
+		return nil
+	})
+
+	peer := newFakePeer(t, ctx)
+	if res := peer.sendMessage(t, ctx, bridgeAddr, "text/plain", "hello"); res.StatusCode != 200 {
+		t.Fatalf("MESSAGE response = %d, want 200", res.StatusCode)
+	}
+	if err := <-handlerErr; err != nil {
+		t.Errorf("context was %v in the MESSAGE handler", err)
+	}
+}

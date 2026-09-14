@@ -29,6 +29,11 @@ type InboundCall struct {
 	conference string
 	offer      []byte
 
+	// cancel ends the context the INVITE handler runs on, so that context is
+	// the leg's own lifetime rather than the INVITE transaction's. Call setup
+	// has to run for as long as the leg it is setting up.
+	cancel context.CancelFunc
+
 	mu     sync.Mutex
 	closed bool
 	done   chan struct{}
@@ -99,6 +104,9 @@ func (c *InboundCall) finish() {
 	c.closed = true
 	c.mu.Unlock()
 
+	if c.cancel != nil {
+		c.cancel()
+	}
 	_ = c.dlg.Close()
 	close(c.done)
 }
@@ -116,11 +124,16 @@ func (t *Transport) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		t.respond(req, tx, 400, "Bad Request")
 		return
 	}
+	// The handler's context is the leg's, derived from the transport's own
+	// lifetime. It is deliberately not the INVITE transaction's: see
+	// Transport.baseCtx for what sipgo hands out there.
+	ctx, cancel := context.WithCancel(t.baseCtx)
 	call := &InboundCall{
 		t:          t,
 		dlg:        dlg,
 		conference: strings.TrimSpace(headerValue(req, t.cfg.ConferenceHeader)),
 		offer:      req.Body(),
+		cancel:     cancel,
 		done:       make(chan struct{}),
 	}
 	if f := req.From(); f != nil {
@@ -143,7 +156,7 @@ func (t *Transport) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	// moment the handler returns, so a handler that returns early would kill
 	// the leg it is supposed to be holding open.
 	defer call.finish()
-	(*h)(sip.ServerTransactionContext(tx), call)
+	(*h)(ctx, call)
 }
 
 func (t *Transport) handleAck(req *sip.Request, tx sip.ServerTransaction) {

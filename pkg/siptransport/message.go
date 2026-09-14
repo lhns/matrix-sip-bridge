@@ -34,7 +34,11 @@ func (t *Transport) handleMessage(req *sip.Request, tx sip.ServerTransaction) {
 	}
 	// The handler runs inline: a MESSAGE transaction is short, and answering
 	// before the bridge has accepted the text would lose messages on restart.
-	if err := (*h)(sip.ServerTransactionContext(tx), msg); err != nil {
+	// The context is the transport's, bounded by the transaction timeout; see
+	// Transport.baseCtx for why it is not the transaction's own.
+	ctx, cancel := context.WithTimeout(t.baseCtx, messageHandlerTimeout)
+	defer cancel()
+	if err := (*h)(ctx, msg); err != nil {
 		t.log.Warn().Err(err).Msg("Rejecting inbound SIP MESSAGE")
 		t.respond(req, tx, 500, "Server Internal Error")
 		return
