@@ -37,6 +37,32 @@ Room type is only ever read from `GetChatInfo`, and nothing in this bridge asks
 for a portal's info again once its room exists. A portal created before this
 change would therefore stay a group room forever.
 
+### The room type also decides the camera and the audio route
+
+Element X builds the Element Call URL itself — it never reads a widget state
+event — and the only call parameter it sets is `intent`. Its choice is
+
+```
+direct && hasActiveCall -> isAudioCall ? JOIN_EXISTING_DM_VOICE : JOIN_EXISTING_DM
+hasActiveCall           -> JOIN_EXISTING
+direct                  -> isAudioCall ? START_CALL_DM_VOICE : START_CALL_DM
+else                    -> START_CALL
+```
+
+where `direct` is the room being a DM and `isAudioCall` is the consensus of
+`m.call.intent` over the room's active RTC memberships. **There is no non-DM
+voice intent**, so in a room that is not a DM the `m.call.intent: "audio"` the
+bridge already publishes is discarded before it reaches Element Call.
+
+Element Call then derives everything from the intent:
+`videoEnabled = callIntent != "audio"`, so a non-voice intent turns the camera
+on; and on mobile the host controls the output devices, where the initial route
+is the earpiece only for an audio intent and the speaker otherwise.
+
+Element X reads the DM-ness from `m.direct` plus a member count that discounts
+`io.element.functional_members`, so a portal absent from `m.direct` fails the
+test however few people are in it.
+
 ## Decision
 
 `GetChatInfo` returns `Type: database.RoomTypeDM` and
@@ -56,3 +82,9 @@ or never.
 - `private_chat_portal_meta` is unrelated: it copies the ghost's name and
   avatar onto a DM portal, and does nothing here because the portal sets its
   own name.
+- A call the Matrix side *starts* still opens with the camera on. Element X
+  only offers a voice intent for a call that already exists, and the bridge
+  cannot publish a membership before the user's own membership tells it to
+  dial. Answering an inbound call is unaffected.
+- The bridge must not publish a video track. Element Call renders and counts
+  video publications regardless of the intent.

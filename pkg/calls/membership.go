@@ -228,7 +228,10 @@ func ghostMembership(userID id.UserID, roomID id.RoomID, deviceID, membershipID,
 		// absolute timestamp here parses as a duration of forty thousand
 		// years, which is not the harmless mistake it looks like: see
 		// membershipExpiry.
-		"expires":       expiry.Milliseconds(),
+		"expires": expiry.Milliseconds(),
+		// Read only in a room the client considers a DM: Element X has no
+		// non-DM voice intent and drops this before Element Call sees it.
+		// Without it the call opens with the camera on and on the speaker.
 		"m.call.intent": "audio",
 		// focus_active and the two livekit_* fields are mandatory in the
 		// receiving parsers. A membership missing any of them is dropped
