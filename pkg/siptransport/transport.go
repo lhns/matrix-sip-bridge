@@ -147,6 +147,22 @@ func New(cfg Config, log zerolog.Logger) (*Transport, error) {
 	return t, nil
 }
 
+// fromHeader is the bridge's own SIP identity, with a fresh dialog tag.
+//
+// It has to be built from sip.username rather than left to the user agent,
+// which would put its own product name in the user part. A SIP server that
+// cannot match the bridge on its source address -- a pod address behind a
+// Service -- matches on the From user part instead, and a mismatch there is a
+// 401 that no password can answer.
+func (t *Transport) fromHeader() *sip.FromHeader {
+	h := &sip.FromHeader{
+		Address: sip.Uri{Scheme: "sip", User: t.cfg.Username, Host: t.cfg.Domain},
+		Params:  sip.NewParams(),
+	}
+	h.Params.Add("tag", sip.GenerateTagN(16))
+	return h
+}
+
 // OnMessage sets the inbound SIP MESSAGE handler.
 func (t *Transport) OnMessage(h MessageHandler) { t.onMessage.Store(&h) }
 
@@ -281,6 +297,7 @@ func (t *Transport) registerLoop(ctx context.Context) {
 func (t *Transport) register(ctx context.Context, expiry time.Duration) error {
 	recipient := sip.Uri{Scheme: "sip", Host: t.cfg.Domain}
 	req := sip.NewRequest(sip.REGISTER, recipient)
+	req.AppendHeader(t.fromHeader())
 	req.AppendHeader(&t.contact)
 	req.AppendHeader(t.allow)
 	exp := sip.ExpiresHeader(expiry / time.Second)
@@ -292,7 +309,7 @@ func (t *Transport) register(ctx context.Context, expiry time.Duration) error {
 	if err != nil {
 		return err
 	}
-	if res.StatusCode == 401 || res.StatusCode == 407 {
+	if isChallenge(res) {
 		res, err = t.registerWithDigest(ctx, req, res)
 		if err != nil {
 			return err
@@ -304,7 +321,19 @@ func (t *Transport) register(ctx context.Context, expiry time.Duration) error {
 	return nil
 }
 
-func (t *Transport) registerWithDigest(ctx context.Context, req *sip.Request, challenge *sip.Response) (*sip.Response, error) {
+// isChallenge reports whether a response is a digest challenge the bridge can
+// answer.
+func isChallenge(res *sip.Response) bool {
+	return res.StatusCode == 401 || res.StatusCode == 407
+}
+
+// authorize copies req with an Authorization header answering the challenge.
+//
+// sip.username and sip.register.password are the bridge's only SIP
+// credentials, and they are not only for REGISTER: a static peer whose source
+// address the server cannot match -- a pod address behind a Service -- is
+// matched on the From user part instead, and that path always challenges.
+func (t *Transport) authorize(req *sip.Request, challenge *sip.Response) (*sip.Request, error) {
 	header, authHeader := "WWW-Authenticate", "Authorization"
 	if challenge.StatusCode == 407 {
 		header, authHeader = "Proxy-Authenticate", "Proxy-Authorization"
@@ -313,12 +342,15 @@ func (t *Transport) registerWithDigest(ctx context.Context, req *sip.Request, ch
 	if h == nil {
 		return nil, fmt.Errorf("%d response without %s", challenge.StatusCode, header)
 	}
+	if t.cfg.Register.Password == "" {
+		return nil, fmt.Errorf("%d %s and sip.register.password is not set", challenge.StatusCode, challenge.Reason)
+	}
 	chal, err := digest.ParseChallenge(h.Value())
 	if err != nil {
 		return nil, fmt.Errorf("parse digest challenge: %w", err)
 	}
 	cred, err := digest.Digest(chal, digest.Options{
-		Method:   string(sip.REGISTER),
+		Method:   string(req.Method),
 		URI:      req.Recipient.Host,
 		Username: t.cfg.Username,
 		Password: t.cfg.Register.Password,
@@ -331,6 +363,30 @@ func (t *Transport) registerWithDigest(ctx context.Context, req *sip.Request, ch
 	// regenerates it for the retry.
 	authed.RemoveHeader("Via")
 	authed.AppendHeader(sip.NewHeader(authHeader, cred.String()))
+	return authed, nil
+}
+
+// doWithDigest sends a non-dialog request and answers a digest challenge once.
+func (t *Transport) doWithDigest(ctx context.Context, req *sip.Request) (*sip.Response, error) {
+	res, err := t.cli.Do(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if !isChallenge(res) {
+		return res, nil
+	}
+	authed, err := t.authorize(req, res)
+	if err != nil {
+		return nil, err
+	}
+	return t.cli.Do(ctx, authed, sipgo.ClientRequestIncreaseCSEQ, sipgo.ClientRequestAddVia)
+}
+
+func (t *Transport) registerWithDigest(ctx context.Context, req *sip.Request, challenge *sip.Response) (*sip.Response, error) {
+	authed, err := t.authorize(req, challenge)
+	if err != nil {
+		return nil, err
+	}
 	return t.cli.Do(ctx, authed, sipgo.ClientRequestIncreaseCSEQ, sipgo.ClientRequestAddVia)
 }
 

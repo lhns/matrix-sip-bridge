@@ -62,6 +62,8 @@ func (t *Transport) SendMessage(ctx context.Context, to, from, body string) erro
 			return fmt.Errorf("parse sender %q: %w", from, err)
 		}
 		req.AppendHeader(&sip.FromHeader{Address: fromURI, Params: sip.NewParams()})
+	} else {
+		req.AppendHeader(t.fromHeader())
 	}
 	req.AppendHeader(sip.NewHeader("Content-Type", contentTypeText))
 	req.AppendHeader(t.allow)
@@ -77,7 +79,7 @@ func (t *Transport) SendMessage(ctx context.Context, to, from, body string) erro
 		return fmt.Errorf("message is %d bytes, over the %d-byte SIP packet limit", n, maxPacketSize)
 	}
 
-	res, err := t.cli.Do(ctx, req)
+	res, err := t.doWithDigest(ctx, req)
 	if err != nil {
 		return fmt.Errorf("send MESSAGE: %w", err)
 	}

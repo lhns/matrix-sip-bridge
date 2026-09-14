@@ -50,6 +50,8 @@ dialplan and peer configuration are written separately, against this section.
 | Port | whatever `sip.listen` says; 5060 by default |
 | Contact | `sip.public_address`, which must be reachable from the SIP server — inside Kubernetes that is the Service address, not the pod's |
 | Registration | off by default: define the bridge as a **static peer**. With `sip.register.enabled: true` it sends REGISTER to `sip.register.server` as `sip.username` with `sip.register.password`, digest auth, re-sent every `sip.register.expiry / 2` (2m30s by default) |
+| Outbound `From` | `sip:<sip.username>@<sip.domain>` on every request the bridge originates. A server that cannot match the bridge by source address — inside Kubernetes the packets come from a pod, not from the Service `host=` names — matches on this user part instead, so it must equal the peer's name |
+| Outbound auth | the bridge answers a 401/407 on INVITE and MESSAGE with `sip.username` and `sip.register.password`, whether or not registration is enabled. A server that challenges a static peer therefore needs a shared secret configured on both sides |
 
 The bridge answers OPTIONS with 200 and an `Allow` listing every method it
 handles, so an Asterisk `qualify` works against it.

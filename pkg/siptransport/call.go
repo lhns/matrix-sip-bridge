@@ -215,6 +215,7 @@ func (t *Transport) Invite(ctx context.Context, to string, headers map[string]st
 		return nil, fmt.Errorf("parse destination %q: %w", to, err)
 	}
 	req := sip.NewRequest(sip.INVITE, recipient)
+	req.AppendHeader(t.fromHeader())
 	req.SetBody(offerSDP(t.mediaHost, t.cfg.MediaPort))
 	req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 	req.AppendHeader(t.allow)
@@ -230,7 +231,13 @@ func (t *Transport) Invite(ctx context.Context, to string, headers map[string]st
 		return nil, fmt.Errorf("send INVITE: %w", err)
 	}
 	call := &OutboundCall{dlg: dlg, done: make(chan struct{})}
-	if err := dlg.WaitAnswer(ctx, sipgo.AnswerOptions{}); err != nil {
+	// Credentials on every outbound INVITE, not just when registration is on:
+	// see Transport.authorize for why a static peer is still challenged.
+	// sipgo answers the 401/407 and retries the INVITE in place.
+	if err := dlg.WaitAnswer(ctx, sipgo.AnswerOptions{
+		Username: t.cfg.Username,
+		Password: t.cfg.Register.Password,
+	}); err != nil {
 		call.finish()
 		return nil, fmt.Errorf("INVITE not answered: %w", err)
 	}

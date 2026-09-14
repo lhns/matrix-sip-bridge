@@ -3,16 +3,70 @@ package siptransport
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
+	"github.com/icholy/digest"
 	"github.com/rs/zerolog"
 )
+
+// The peer's credentials. A static Asterisk peer whose source address the
+// server cannot match is matched on the From user part instead, and that path
+// challenges every request -- INVITE and MESSAGE included, not just REGISTER.
+const (
+	testSIPPassword = "peer-password"
+	testSIPRealm    = "asterisk"
+	testSIPNonce    = "0123456789abcdef"
+)
+
+func testChallenge() string {
+	return (&digest.Challenge{
+		Realm:     testSIPRealm,
+		Nonce:     testSIPNonce,
+		Algorithm: "MD5",
+		QOP:       []string{"auth"},
+	}).String()
+}
+
+// verifyDigest recomputes the response the peer expects. The client's own
+// cnonce and nonce count are echoed back, so the comparison is exact rather
+// than a check that some Authorization header was present.
+func verifyDigest(req *sip.Request) error {
+	h := req.GetHeader("Authorization")
+	if h == nil {
+		return errors.New("no Authorization header")
+	}
+	cred, err := digest.ParseCredentials(h.Value())
+	if err != nil {
+		return err
+	}
+	chal := &digest.Challenge{Realm: cred.Realm, Nonce: cred.Nonce, Algorithm: cred.Algorithm}
+	if cred.QOP != "" {
+		chal.QOP = []string{cred.QOP}
+	}
+	want, err := digest.Digest(chal, digest.Options{
+		Method:   string(req.Method),
+		URI:      cred.URI,
+		Username: cred.Username,
+		Password: testSIPPassword,
+		Cnonce:   cred.Cnonce,
+		Count:    cred.Nc,
+	})
+	if err != nil {
+		return err
+	}
+	if want.Response != cred.Response {
+		return fmt.Errorf("digest response mismatch for %s", req.Method)
+	}
+	return nil
+}
 
 // These tests run a real SIP conversation between the bridge's transport and a
 // second sipgo user agent standing in for the SIP server, over a loopback TCP
@@ -28,9 +82,40 @@ type fakePeer struct {
 	srv  *sipgo.Server
 	cli  *sipgo.Client
 	dua  *sipgo.DialogUA
+	dlg  *sipgo.DialogServerCache
 	addr string
 
 	messages chan *sip.Request
+	invites  chan *sip.Request
+
+	// requireAuth makes the peer challenge every INVITE and MESSAGE once,
+	// then verify the credentials on the retry.
+	requireAuth atomic.Bool
+	// authFailure records a retry whose digest did not verify, so a test
+	// fails on a wrong password rather than on a timeout.
+	authFailure atomic.Pointer[string]
+}
+
+// challenged answers an unauthenticated request with 401 and reports that it
+// did. A retry carrying credentials is verified and allowed through.
+func (p *fakePeer) challenged(req *sip.Request, tx sip.ServerTransaction) bool {
+	if !p.requireAuth.Load() {
+		return false
+	}
+	if req.GetHeader("Authorization") == nil {
+		res := sip.NewResponseFromRequest(req, 401, "Unauthorized", nil)
+		res.AppendHeader(sip.NewHeader("WWW-Authenticate", testChallenge()))
+		_ = tx.Respond(res)
+		return true
+	}
+	if err := verifyDigest(req); err != nil {
+		msg := err.Error()
+		p.authFailure.Store(&msg)
+		res := sip.NewResponseFromRequest(req, 403, "Forbidden", nil)
+		_ = tx.Respond(res)
+		return true
+	}
+	return false
 }
 
 func newFakePeer(t *testing.T, ctx context.Context) *fakePeer {
@@ -63,11 +148,37 @@ func newFakePeer(t *testing.T, ctx context.Context) *fakePeer {
 			Address: sip.Uri{Scheme: "sip", User: "pbx", Host: host, Port: port},
 		}},
 		messages: make(chan *sip.Request, 4),
+		invites:  make(chan *sip.Request, 4),
 	}
+	p.dlg = sipgo.NewDialogServerCache(cli, sip.ContactHeader{
+		Address: sip.Uri{Scheme: "sip", User: "pbx", Host: host, Port: port},
+	})
 	srv.OnMessage(func(req *sip.Request, tx sip.ServerTransaction) {
+		if p.challenged(req, tx) {
+			return
+		}
 		p.messages <- req
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 200, "OK", nil))
 	})
+	srv.OnInvite(func(req *sip.Request, tx sip.ServerTransaction) {
+		if p.challenged(req, tx) {
+			return
+		}
+		dlg, err := p.dlg.ReadInvite(req, tx)
+		if err != nil {
+			_ = tx.Respond(sip.NewResponseFromRequest(req, 400, "Bad Request", nil))
+			return
+		}
+		answer, err := answerSDP(req.Body(), host, 41000)
+		if err != nil {
+			_ = dlg.Respond(488, "Not Acceptable Here", nil)
+			return
+		}
+		p.invites <- req
+		_ = dlg.RespondSDP(answer)
+	})
+	srv.OnAck(func(req *sip.Request, tx sip.ServerTransaction) { _ = p.dlg.ReadAck(req, tx) })
+	srv.OnBye(func(req *sip.Request, tx sip.ServerTransaction) { _ = p.dlg.ReadBye(req, tx) })
 	go func() { _ = srv.ServeTCP(ln) }()
 	t.Cleanup(func() {
 		_ = srv.Close()
@@ -620,5 +731,126 @@ func TestInboundCallAnswerSurvivesAByeBeforeTheAck(t *testing.T) {
 	}
 	if err := dlg.Ack(ctx); err != nil {
 		t.Fatalf("ACK: %v", err)
+	}
+}
+
+// An outbound INVITE that is challenged must be retried with the bridge's
+// credentials. Asterisk challenges a static peer it could not match on its
+// source address, so without this an outbound call is a 401 and nothing else.
+func TestOutboundInviteAnswersADigestChallenge(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	peer := newFakePeer(t, ctx)
+	peer.requireAuth.Store(true)
+	tr, _ := startBridge(t, ctx, func(c *Config) { c.Register.Password = testSIPPassword })
+
+	call, err := tr.Invite(ctx, "sip:15551234567@"+peer.addr,
+		map[string]string{"X-Conference": "sip-15551234567"})
+	if err != nil {
+		t.Fatalf("Invite: %v", err)
+	}
+	defer func() { _ = call.Hangup(ctx) }()
+
+	select {
+	case req := <-peer.invites:
+		if req.GetHeader("Authorization") == nil {
+			t.Error("the accepted INVITE carried no Authorization header")
+		}
+		if h := req.GetHeader("X-Conference"); h == nil || h.Value() != "sip-15551234567" {
+			t.Errorf("X-Conference = %v, want it to survive the retry", h)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("peer never accepted an INVITE")
+	}
+	if f := peer.authFailure.Load(); f != nil {
+		t.Errorf("peer rejected the credentials: %s", *f)
+	}
+}
+
+// The same challenge on a SIP MESSAGE, which travels the same unmatched-peer
+// path as the INVITE does.
+func TestOutboundMessageAnswersADigestChallenge(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	peer := newFakePeer(t, ctx)
+	peer.requireAuth.Store(true)
+	tr, _ := startBridge(t, ctx, func(c *Config) { c.Register.Password = testSIPPassword })
+
+	err := tr.SendMessage(ctx, "sip:15551234567@"+peer.addr, "sip:15559876543@example.com", "hi there")
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	select {
+	case req := <-peer.messages:
+		if req.GetHeader("Authorization") == nil {
+			t.Error("the accepted MESSAGE carried no Authorization header")
+		}
+		if string(req.Body()) != "hi there" {
+			t.Errorf("body = %q, want it to survive the retry", req.Body())
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("peer never accepted a MESSAGE")
+	}
+	if f := peer.authFailure.Load(); f != nil {
+		t.Errorf("peer rejected the credentials: %s", *f)
+	}
+}
+
+// A challenge with no password configured has to name the missing setting:
+// the alternative is a bare "401 Unauthorized" that reads as a server fault.
+func TestChallengeWithoutAPasswordNamesTheSetting(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	peer := newFakePeer(t, ctx)
+	peer.requireAuth.Store(true)
+	tr, _ := startBridge(t, ctx, nil)
+
+	err := tr.SendMessage(ctx, "sip:15551234567@"+peer.addr, "sip:15559876543@example.com", "hi there")
+	if err == nil {
+		t.Fatal("expected the unauthenticated MESSAGE to fail")
+	}
+	if !strings.Contains(err.Error(), "sip.register.password") {
+		t.Errorf("err = %v, want it to name sip.register.password", err)
+	}
+}
+
+// The From user part is the bridge's SIP username, not the user agent's
+// product name. It is what an Asterisk peer is matched on when the source
+// address is a pod behind a Service, and a mismatch is a 401 no credential can
+// answer.
+func TestOutboundRequestsAreFromTheConfiguredUsername(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	peer := newFakePeer(t, ctx)
+	tr, _ := startBridge(t, ctx, func(c *Config) { c.Username = "matrixbridge" })
+
+	call, err := tr.Invite(ctx, "sip:15551234567@"+peer.addr, nil)
+	if err != nil {
+		t.Fatalf("Invite: %v", err)
+	}
+	defer func() { _ = call.Hangup(ctx) }()
+	select {
+	case req := <-peer.invites:
+		if from := req.From(); from == nil || from.Address.User != "matrixbridge" {
+			t.Errorf("INVITE From = %v, want user matrixbridge", from)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("peer never received the INVITE")
+	}
+
+	if err := tr.SendMessage(ctx, "sip:15551234567@"+peer.addr, "", "hi there"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	select {
+	case req := <-peer.messages:
+		if from := req.From(); from == nil || from.Address.User != "matrixbridge" {
+			t.Errorf("MESSAGE From = %v, want user matrixbridge", from)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("peer never received the MESSAGE")
 	}
 }
