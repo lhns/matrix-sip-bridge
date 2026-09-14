@@ -14,7 +14,6 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/id"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/database"
 	"github.com/lhns/matrix-sip-bridge/pkg/phonenum"
@@ -764,6 +763,3 @@ func (s *Subsystem) forgetSeen(callID string) {
 	defer s.seenMu.Unlock()
 	delete(s.seen, callID)
 }
-
-// RoomOf is a convenience for logging and tests.
-func (s *Subsystem) RoomOf(call *database.Call) id.RoomID { return call.RoomID }

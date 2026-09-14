@@ -35,8 +35,6 @@ const (
 
 // Call is one telephone call being bridged.
 type Call struct {
-	qh *dbutil.QueryHelper[*Call]
-
 	// CallID is the bridge's own identifier, not the SIP server's and not
 	// LiveKit's.
 	CallID string
@@ -70,8 +68,8 @@ type CallQuery struct {
 	*dbutil.QueryHelper[*Call]
 }
 
-func newCall(qh *dbutil.QueryHelper[*Call]) *Call {
-	return &Call{qh: qh}
+func newCall(*dbutil.QueryHelper[*Call]) *Call {
+	return &Call{}
 }
 
 const (
@@ -88,7 +86,6 @@ const (
 		    lk_participant = $5, state = $6, updated_at = $7
 		WHERE call_id = $1
 	`
-	getCallByIDQuery = `SELECT ` + callColumns + ` FROM sip_call WHERE call_id = $1`
 	// An "active" call is anything not yet ended. There is at most one per
 	// number, so ordering by created_at only matters if state got out of sync.
 	getActiveCallByPortalQuery = `
@@ -104,8 +101,7 @@ const (
 	getAllActiveCallsQuery = `
 		SELECT ` + callColumns + ` FROM sip_call WHERE state <> 'ended'
 	`
-	endAllCallsQuery      = `UPDATE sip_call SET state = 'ended', updated_at = $1 WHERE state <> 'ended'`
-	deleteEndedCallsQuery = `DELETE FROM sip_call WHERE state = 'ended' AND updated_at < $1`
+	endAllCallsQuery = `UPDATE sip_call SET state = 'ended', updated_at = $1 WHERE state <> 'ended'`
 )
 
 // Scan reads one row.
@@ -149,11 +145,6 @@ func (cq *CallQuery) Update(ctx context.Context, c *Call) error {
 		c.LKParticipant, c.State, c.UpdatedAt.UnixMilli())
 }
 
-// GetByID returns one call, or nil if it does not exist.
-func (cq *CallQuery) GetByID(ctx context.Context, callID string) (*Call, error) {
-	return cq.QueryOne(ctx, getCallByIDQuery, callID)
-}
-
 // GetActiveByPortal returns the call in progress for a number, or nil.
 func (cq *CallQuery) GetActiveByPortal(ctx context.Context, portalID string) (*Call, error) {
 	return cq.QueryOne(ctx, getActiveCallByPortalQuery, portalID)
@@ -176,9 +167,4 @@ func (cq *CallQuery) GetAllActive(ctx context.Context) ([]*Call, error) {
 // names is gone, so startup clears it rather than trying to resume.
 func (cq *CallQuery) EndAll(ctx context.Context) error {
 	return cq.Exec(ctx, endAllCallsQuery, time.Now().UnixMilli())
-}
-
-// DeleteEndedBefore prunes finished calls kept only for debugging.
-func (cq *CallQuery) DeleteEndedBefore(ctx context.Context, cutoff time.Time) error {
-	return cq.Exec(ctx, deleteEndedCallsQuery, cutoff.UnixMilli())
 }

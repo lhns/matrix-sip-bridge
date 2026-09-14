@@ -27,15 +27,11 @@ var CallMemberEventType = event.Type{
 // Element Web have not always agreed on which they send.
 type CallMemberContent struct {
 	// Inline (current) form.
-	Application    string `json:"application,omitempty"`
-	CallID         string `json:"call_id,omitempty"`
-	DeviceID       string `json:"device_id,omitempty"`
-	Scope          string `json:"scope,omitempty"`
-	ExpiresTS      int64  `json:"expires,omitempty"`
-	CreatedTS      int64  `json:"created_ts,omitempty"`
-	FocusActive    any    `json:"focus_active,omitempty"`
-	MembershipID   string `json:"membershipID,omitempty"`
-	LiveKitAliasV1 string `json:"livekit_alias,omitempty"`
+	Application  string `json:"application,omitempty"`
+	CallID       string `json:"call_id,omitempty"`
+	DeviceID     string `json:"device_id,omitempty"`
+	ExpiresTS    int64  `json:"expires,omitempty"`
+	MembershipID string `json:"membershipID,omitempty"`
 
 	// Legacy (array) form.
 	Memberships []CallMembership `json:"memberships,omitempty"`
@@ -43,10 +39,7 @@ type CallMemberContent struct {
 
 // CallMembership is one entry of the legacy memberships array.
 type CallMembership struct {
-	Application  string `json:"application,omitempty"`
-	CallID       string `json:"call_id,omitempty"`
 	DeviceID     string `json:"device_id,omitempty"`
-	Scope        string `json:"scope,omitempty"`
 	ExpiresTS    int64  `json:"expires,omitempty"`
 	MembershipID string `json:"membershipID,omitempty"`
 }

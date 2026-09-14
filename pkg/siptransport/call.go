@@ -25,7 +25,6 @@ type InboundCall struct {
 	dlg *sipgo.DialogServerSession
 
 	from       string
-	to         string
 	conference string
 	offer      []byte
 
@@ -42,21 +41,9 @@ type InboundCall struct {
 // From is the caller's URI as the SIP server presented it.
 func (c *InboundCall) From() string { return c.from }
 
-// To is the URI the call was placed to.
-func (c *InboundCall) To() string { return c.to }
-
 // Conference is the value of the configured conference header, naming the
 // conference the caller will land in.
 func (c *InboundCall) Conference() string { return c.conference }
-
-// Header returns an arbitrary header from the INVITE.
-func (c *InboundCall) Header(name string) string {
-	h := c.dlg.InviteRequest.GetHeader(name)
-	if h == nil {
-		return ""
-	}
-	return h.Value()
-}
 
 // Done is closed when the leg is gone, by BYE, CANCEL or transaction failure.
 func (c *InboundCall) Done() <-chan struct{} { return c.done }
@@ -149,9 +136,6 @@ func (t *Transport) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	}
 	if f := req.From(); f != nil {
 		call.from = f.Address.String()
-	}
-	if to := req.To(); to != nil {
-		call.to = to.Address.String()
 	}
 	// OnStateReplay, not OnState: ReadInvite already wired CANCEL and
 	// transaction termination to the dialog state, and either can have fired

@@ -1,7 +1,6 @@
 package connector
 
 import (
-	"strings"
 	"testing"
 	"time"
 
@@ -70,27 +69,6 @@ func TestParseInboundMessage(t *testing.T) {
 			}
 			if got.From != tt.wantFrom || got.To != tt.wantTo || got.Body != tt.wantBody {
 				t.Errorf("got %+v, want From=%q To=%q Body=%q", got, tt.wantFrom, tt.wantTo, tt.wantBody)
-			}
-		})
-	}
-}
-
-func TestOutboundURITemplate(t *testing.T) {
-	tests := []struct {
-		name     string
-		template string
-		number   string
-		want     string
-	}{
-		{"sip uri", "sip:{number}@pbx.example.com", "+15551234567", "sip:+15551234567@pbx.example.com"},
-		{"other domain", "sip:{number}@sms.example.com", "+442071234567", "sip:+442071234567@sms.example.com"},
-		{"template with no placeholder is left alone", "sip:voicemail@pbx.example.com", "+15551234567", "sip:voicemail@pbx.example.com"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := strings.ReplaceAll(tt.template, "{number}", tt.number)
-			if got != tt.want {
-				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
 	}

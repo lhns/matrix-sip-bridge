@@ -226,22 +226,17 @@ func (c *LiveKitClient) UpdateSIPOutboundTrunk(ctx context.Context, id string, t
 // CreateSIPParticipantRequest asks livekit-sip to place a SIP call and put the
 // far end into a LiveKit room.
 type CreateSIPParticipantRequest struct {
-	SipTrunkID          string            `json:"sip_trunk_id"`
-	SipCallTo           string            `json:"sip_call_to"`
-	RoomName            string            `json:"room_name"`
-	ParticipantIdentity string            `json:"participant_identity"`
-	ParticipantName     string            `json:"participant_name,omitempty"`
-	ParticipantMetadata string            `json:"participant_metadata,omitempty"`
-	Headers             map[string]string `json:"headers,omitempty"`
-	WaitUntilAnswered   bool              `json:"wait_until_answered,omitempty"`
+	SipTrunkID          string `json:"sip_trunk_id"`
+	SipCallTo           string `json:"sip_call_to"`
+	RoomName            string `json:"room_name"`
+	ParticipantIdentity string `json:"participant_identity"`
+	ParticipantName     string `json:"participant_name,omitempty"`
+	WaitUntilAnswered   bool   `json:"wait_until_answered,omitempty"`
 }
 
 // SIPParticipant is the subset of livekit.SIPParticipantInfo the bridge keeps.
 type SIPParticipant struct {
-	ParticipantID       string `json:"participant_id,omitempty"`
-	ParticipantIdentity string `json:"participant_identity,omitempty"`
-	RoomName            string `json:"room_name,omitempty"`
-	SipCallID           string `json:"sip_call_id,omitempty"`
+	ParticipantID string `json:"participant_id,omitempty"`
 }
 
 // CreateSIPParticipant dials out through livekit-sip.
