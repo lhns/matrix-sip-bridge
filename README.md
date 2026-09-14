@@ -230,6 +230,34 @@ from anyone but the one user who logged in. If the far end is SMS, blank the
 `relay.message_formats` templates too: they prefix each message with the
 sender's name, which wastes a length-limited message.
 
+### Double puppeting is required for calls
+
+A portal invite the user has not accepted makes calls unreachable rather than
+untidy: the RTC membership that rings is a state event inside the portal room,
+and a non-member cannot see it. The bridge therefore joins the user itself
+before every call, which needs double puppeting:
+
+```yaml
+double_puppet:
+    secrets:
+        example.com: as_token:<the appservice as_token>
+```
+
+The `as_token:` prefix is part of the value, not a placeholder — without it
+mautrix treats the whole string as a saved access token and disables double
+puppeting with no error. The generated registration does not claim the local
+users, so add the namespace by hand:
+
+```yaml
+namespaces:
+    users:
+        - regex: ^@.*:example\.com$
+          exclusive: false
+```
+
+If no double puppet is available the bridge falls back to inviting and logs a
+warning saying the invite has to be accepted by hand.
+
 ### Configuration from the environment
 
 mxmain reads config values from the environment only if `env_config_prefix` is

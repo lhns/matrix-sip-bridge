@@ -439,11 +439,11 @@ func (s *Subsystem) portalForNumber(ctx context.Context, portalID string) (*brid
 	if err != nil {
 		return nil, fmt.Errorf("get portal %s: %w", portalID, err)
 	}
+	source, err := s.sourceLogin()
+	if err != nil {
+		return nil, err
+	}
 	if portal.MXID == "" {
-		source, err := s.sourceLogin()
-		if err != nil {
-			return nil, err
-		}
 		// The room info is left to bridgev2, which asks the login's
 		// GetChatInfo for it. That is the same call the inbound SMS path makes
 		// through QueueRemoteEvent, so both paths land on one portal per
@@ -452,6 +452,11 @@ func (s *Subsystem) portalForNumber(ctx context.Context, portalID string) (*brid
 			return nil, fmt.Errorf("create room for %s: %w", portalID, err)
 		}
 	}
+	// Every call, not just the first: GetChatInfo lists only the ghost, so
+	// bridgev2 leaves the Matrix user to UserLogin.MarkInPortal, which runs
+	// before the room exists and caches itself as done. Nothing else ever
+	// rechecks the user's membership.
+	s.ensureUserInPortal(ctx, portal, source)
 	return portal, nil
 }
 
