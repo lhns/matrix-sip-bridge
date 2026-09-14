@@ -16,8 +16,7 @@ type Config struct {
 	// Listen is the address the bridge accepts SIP on, "host:port".
 	Listen string `yaml:"listen"`
 	// Transport is "tcp" or "udp". TCP is the default and should stay that
-	// way: chan_sip caps a SIP packet at 20480 bytes, and a multi-part SMS
-	// that overflows a UDP datagram is dropped without an error anywhere.
+	// way; see maxPacketSize.
 	Transport string `yaml:"transport"`
 	// PublicAddress is the "host:port" other SIP elements reach the bridge on,
 	// used in Contact and Via. Defaults to Listen, which is wrong behind NAT.
@@ -33,12 +32,9 @@ type Config struct {
 	Register RegisterConfig `yaml:"register"`
 
 	// MediaAddress and MediaPort are what the bridge writes into SDP. No
-	// socket is ever opened on them: the bridge has no media stack, and its
-	// leg is a control leg that the dialplan hangs up within a few hundred
-	// milliseconds. The SDP must still be a plausible answer, because a 200 OK
-	// with no SDP sets SIP_PENDINGBYE in chan_sip and tears the call down,
-	// c=0.0.0.0 or a=inactive is parsed as hold, and a zero port rejects the
-	// stream outright. MediaAddress defaults to the host of PublicAddress.
+	// socket is ever opened on them: the bridge has no media stack. See
+	// sdp.go for why the answer must nonetheless be a real, non-held one on
+	// a non-zero port. MediaAddress defaults to the host of PublicAddress.
 	MediaAddress string `yaml:"media_address"`
 	MediaPort    int    `yaml:"media_port"`
 

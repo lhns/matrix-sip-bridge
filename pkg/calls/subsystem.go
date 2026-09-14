@@ -164,10 +164,9 @@ func (s *Subsystem) Start(ctx context.Context, reg EventRegistrar) error {
 	if err := s.db.Upgrade(ctx); err != nil {
 		return fmt.Errorf("upgrade call tables: %w", err)
 	}
-	// Call state lives in LiveKit and the SIP server; this table is only a
-	// cache of it, and after a restart every leg it names is gone. The rows
-	// are read before they are cleared, because they name the RTC memberships
-	// a previous run may have left behind.
+	// The rows are read before they are cleared, because they name the RTC
+	// memberships a previous run may have left behind. See CallQuery.EndAll
+	// for why a restart clears them at all.
 	stale, err := s.db.Call.GetAllActive(ctx)
 	if err != nil {
 		return fmt.Errorf("list calls from the last run: %w", err)
@@ -223,11 +222,9 @@ func newCallID() string {
 
 // HandleInboundCall owns an inbound control leg for its whole life.
 //
-// The sequence is fixed by what Asterisk does with a parallel Dial(): reply
-// 180 so the branch stays alive, put the media in place, and answer only once
-// a Matrix user has actually joined. Dial() hangs up every other branch with
-// ANSWERED_ELSEWHERE the instant one answers, so answering speculatively would
-// take the call away from the other endpoints.
+// The order is fixed: 180 so the branch stays alive, the media in place, and
+// 200 only once a Matrix user has joined. See InboundCall.Answer for why the
+// last of those must never happen speculatively.
 func (s *Subsystem) HandleInboundCall(ctx context.Context, leg InboundLeg) {
 	if !s.cfg.Enabled {
 		_ = leg.Reject(503, "Service Unavailable")
@@ -345,9 +342,8 @@ func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg 
 	}
 	log.Info().Msg("Call answered; the dialplan now moves the caller into the conference")
 
-	// The dialplan's gosub hangs this leg up within a few hundred
-	// milliseconds. That is the expected end of the leg and says nothing about
-	// the call, which from here on is watched through LiveKit.
+	// The end of this leg is expected and says nothing about the call, which
+	// from here on is watched through LiveKit.
 	select {
 	case <-leg.Done():
 	case <-ctx.Done():

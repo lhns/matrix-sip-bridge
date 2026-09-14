@@ -139,12 +139,9 @@ send one that would not.
 
 ### Worked example, for Asterisk
 
-Illustrative only. This is not part of the bridge and has not been run end to
-end; it shows the shape the contract above expects. Every application and option
-name in it was checked against the Asterisk API reference — `ConfBridge`,
-`Originate` and `MessageSend` argument order, the `U()` gosub's
-`GOSUB_RESULT=CONTINUE`, `MASTER_CHANNEL`, and the ConfBridge user-profile
-options — but the flow itself has not been exercised.
+Illustrative only, and not part of the bridge: it shows the shape the contract
+above expects. The application and option names were checked against the
+Asterisk reference, but the flow has never been run end to end.
 
 ```
 ; ---- inbound: ring the bridge alongside the desk phone -------------------

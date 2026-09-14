@@ -31,10 +31,8 @@ type LiveKitConfig struct {
 	// credentials for the trunk.
 	TrunkAuthUsername string `yaml:"trunk_auth_username"`
 	TrunkAuthPassword string `yaml:"trunk_auth_password"`
-	// TrunkReconcileInterval is how often the trunk is re-checked. livekit-sip
-	// keeps trunk objects in Redis, so a Redis restart silently loses them and
-	// every subsequent call fails; periodic reconciliation is the only way the
-	// bridge notices.
+	// TrunkReconcileInterval is how often the trunk is re-checked; see
+	// reconcileTrunk for what that is guarding against.
 	TrunkReconcileInterval time.Duration `yaml:"trunk_reconcile_interval"`
 }
 
@@ -311,10 +309,8 @@ type listParticipantsResponse struct {
 }
 
 // ParticipantPresent reports whether an identity is still in a LiveKit room.
-//
-// This is the bridge's only liveness signal for a call in progress. Its own
-// SIP leg is gone seconds in by design, so the SIP participant leaving the
-// room is what "the call ended" means here.
+// It is the bridge's only liveness signal for a call in progress; see
+// Subsystem.runParticipantWatcher.
 func (c *LiveKitClient) ParticipantPresent(ctx context.Context, room, identity string) (bool, error) {
 	var resp listParticipantsResponse
 	g := grants{Video: &videoGrant{RoomAdmin: true, Room: room}}

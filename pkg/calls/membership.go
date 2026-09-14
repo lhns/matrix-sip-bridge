@@ -30,9 +30,7 @@ func deviceIDFor(callID string) string {
 // checkRtcMembershipData rejects a membership whose member.user_id is not the
 // sender, so appservice masquerading is load-bearing here.
 //
-// There is no refresh timer. The membership lives exactly as long as one call
-// and is retracted when it ends, so the only thing "expires" has to outlast is
-// a single call; membership_expiry is set well beyond any plausible one.
+// There is no refresh timer; see Config.MembershipExpiry.
 func (s *Subsystem) publishGhostMembership(ctx context.Context, call *database.Call) error {
 	ghost, err := s.ghostFor(ctx, call.PortalID)
 	if err != nil {

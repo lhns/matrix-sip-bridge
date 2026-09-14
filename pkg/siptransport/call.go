@@ -58,9 +58,8 @@ func (c *InboundCall) Ringing() error {
 //
 // Answering is the commitment: Dial() hangs up every other branch with
 // ANSWERED_ELSEWHERE the instant one answers, so this must not be called
-// speculatively. The SDP must be a genuine answer — a 200 with no body sets
-// SIP_PENDINGBYE in chan_sip and tears the call down, and c=0.0.0.0 or
-// a=inactive is read as hold.
+// speculatively. See sdp.go for why the body must be a genuine, non-held
+// answer rather than an empty one.
 func (c *InboundCall) Answer() error {
 	if len(c.offer) == 0 {
 		_ = c.Reject(488, "Not Acceptable Here")

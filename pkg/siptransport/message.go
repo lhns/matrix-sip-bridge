@@ -71,9 +71,8 @@ func (t *Transport) SendMessage(ctx context.Context, to, from, body string) erro
 		req.SetDestination(dest)
 	}
 
-	// chan_sip drops anything over SIP_MAX_PACKET_SIZE. Over UDP an
-	// oversized message is lost without a response at all, so the size is
-	// checked on the whole serialised request rather than on the body.
+	// Checked on the whole serialised request rather than on the body,
+	// because it is the packet that is capped; see maxPacketSize.
 	if n := len(req.String()); n > maxPacketSize {
 		return fmt.Errorf("message is %d bytes, over the %d-byte SIP packet limit", n, maxPacketSize)
 	}
