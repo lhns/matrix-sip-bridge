@@ -304,7 +304,6 @@ type listParticipantsRequest struct {
 type listParticipantsResponse struct {
 	Participants []struct {
 		Identity string `json:"identity,omitempty"`
-		State    string `json:"state,omitempty"`
 	} `json:"participants"`
 }
 
