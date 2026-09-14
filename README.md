@@ -139,8 +139,12 @@ send one that would not.
 
 ### Worked example, for Asterisk
 
-Illustrative only. This is not part of the bridge and has not been run; it shows
-the shape the contract above expects.
+Illustrative only. This is not part of the bridge and has not been run end to
+end; it shows the shape the contract above expects. Every application and option
+name in it was checked against the Asterisk API reference — `ConfBridge`,
+`Originate` and `MessageSend` argument order, the `U()` gosub's
+`GOSUB_RESULT=CONTINUE`, `MASTER_CHANNEL`, and the ConfBridge user-profile
+options — but the flow itself has not been exercised.
 
 ```
 ; ---- inbound: ring the bridge alongside the desk phone -------------------
@@ -156,10 +160,10 @@ exten => _+X.,1,Set(CONF=sip-${FILTER(0-9,${EXTEN})})
 ; Runs on whichever leg answered. CONTINUE hangs that leg up and lets the
 ; caller carry on in the dialplan instead of being bridged to it.
 [matrix-answered]
-exten => s,1,ExecIf($["${CHANNEL(peername)}"!="matrixbridge"]?Return())
+exten => s,1,GotoIf($["${CHANNEL(peername)}"!="matrixbridge"]?done)
  same => n,Set(MASTER_CHANNEL(MATRIX_ANSWERED)=1)
  same => n,Set(GOSUB_RESULT=CONTINUE)
- same => n,Return()
+ same => n(done),Return()
 
 ; ---- livekit-sip dials the conference by name ----------------------------
 [from-livekit]
@@ -183,14 +187,24 @@ exten => _.,1,MessageSend(sip:${EXTEN}@matrix-sip-bridge.example.com:5060,${MESS
 ```
 
 ```ini
-; confbridge.conf — the caller leaves when livekit-sip does
+; confbridge.conf — the caller leaves when livekit-sip does.
+;
+; The option is "marked", not "marked_user". app_confbridge refuses to load the
+; WHOLE FILE on a single unrecognised key, so one wrong name here does not
+; produce one broken profile: ConfBridge() disappears from the dialplan
+; entirely, taking every other context that uses it with it. Check the Asterisk
+; log after editing this file.
 [matrix_marked](type=user)
-marked_user=yes
+marked=yes
 
 [matrix_caller](type=user)
 end_marked=yes
 wait_marked=no
 ```
+
+`default_bridge` above is the bridge profile from Asterisk's own
+`confbridge.conf.sample`; if that sample was never installed, name a profile
+that exists.
 
 ## Configuration
 
