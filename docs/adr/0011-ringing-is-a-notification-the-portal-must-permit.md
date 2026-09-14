@@ -58,8 +58,14 @@ room cannot be encrypted or tombstoned by a member (ADR-0010).
 
 bridgev2 applies those overrides while creating a room and never revisits them,
 so the call subsystem re-applies the connector's `ChatInfo` to an existing
-portal on every call. That is also what repairs portals created before this
-decision.
+portal. That is what repairs portals created before this decision. It checks
+the room's power levels first and does nothing when there is nothing to
+repair, because re-sending room state on every call is both a write for no
+reason and a change clients render.
+
+`ChatInfo.Members.IsFull` stays false. The SIP side has no idea who is in a
+portal on the Matrix side, and bridgev2 removes every joined member a full
+list omits.
 
 Send `m.rtc.notification` as the ghost when an inbound call starts ringing,
 with `notification_type: "ring"`, `m.call.intent: "audio"`, a `lifetime` equal
@@ -81,6 +87,9 @@ already in the session, so notifying would ring the caller's own phone.
 - Matching a decline to the notification it references, rather than to the room
   it arrived in, is what stops a late decline from a second device rejecting a
   later call to the same number.
+- Re-applying chat info is a room-state write, so it must stay conditional.
+  Marking the member list full turns it into a kick of the owning user, with
+  the reason "User is not in remote chat", once per call.
 - A decline for a notification sent by a previous run of the bridge is ignored;
   the map from notification to call is in memory, and a restart ends every call
   it names anyway.

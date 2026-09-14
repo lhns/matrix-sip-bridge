@@ -712,22 +712,47 @@ func (s *Subsystem) portalForNumber(ctx context.Context, portalID string) (*brid
 	return portal, nil
 }
 
-// reapplyChatInfo pushes the connector's room description into a portal that
-// already exists.
+// reapplyChatInfo repairs a portal that was created before the call-capable
+// power levels existed.
 //
-// It is what repairs rooms created before a change to GetChatInfo: bridgev2
-// applies the power level overrides while creating a room and never revisits
-// them, so a portal made without them would stay uncallable forever. Running
-// it per call rather than once at startup also covers a room whose power
-// levels someone edited by hand.
+// bridgev2 applies the power level overrides while creating a room and never
+// revisits them, so without this an older portal would stay uncallable
+// forever. It runs on every call, so it checks first and does nothing at all
+// in the normal case: re-sending room state each time is both a write against
+// the database for no reason and a change clients render.
 func (s *Subsystem) reapplyChatInfo(ctx context.Context, portal *bridgev2.Portal, source *bridgev2.UserLogin) {
+	levels, err := s.br.Matrix.GetPowerLevels(ctx, portal.MXID)
+	if err != nil {
+		s.log.Warn().Err(err).Str("portal_id", string(portal.ID)).
+			Msg("Could not read the portal's power levels")
+		return
+	}
+	if callPowerLevelsApplied(levels) {
+		return
+	}
 	info, err := source.Client.GetChatInfo(ctx, portal)
 	if err != nil {
 		s.log.Warn().Err(err).Str("portal_id", string(portal.ID)).
 			Msg("Could not refresh the portal description")
 		return
 	}
+	s.log.Info().Str("portal_id", string(portal.ID)).
+		Msg("Granting the portal the power levels a call needs")
 	portal.UpdateInfo(ctx, info, source, nil, time.Time{})
+}
+
+// callPowerLevelsApplied reports whether a room already lets its members send
+// the RTC membership, i.e. whether there is anything to repair.
+func callPowerLevelsApplied(levels *event.PowerLevelsEventContent) bool {
+	if levels == nil {
+		return false
+	}
+	for evtType, want := range MembershipPowerLevels() {
+		if levels.GetEventLevel(evtType) != want {
+			return false
+		}
+	}
+	return true
 }
 
 // sourceLogin returns the login every portal is created on behalf of.

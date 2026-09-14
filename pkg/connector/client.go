@@ -67,7 +67,11 @@ func (sc *SIPClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (*b
 	return &bridgev2.ChatInfo{
 		Name: ptr.Ptr(number),
 		Members: &bridgev2.ChatMemberList{
-			IsFull: true,
+			// Not full, and saying otherwise kicks people. A portal's Matrix
+			// side has members the SIP side knows nothing about -- the owning
+			// user above all -- and bridgev2 removes every joined member a
+			// full list omits, with the reason "User is not in remote chat".
+			IsFull: false,
 			Members: []bridgev2.ChatMember{{
 				EventSender: bridgev2.EventSender{Sender: networkid.UserID(portal.ID)},
 				Membership:  event.MembershipJoin,

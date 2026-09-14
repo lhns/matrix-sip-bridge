@@ -1,10 +1,14 @@
 package connector
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"gopkg.in/yaml.v3"
+	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 )
 
 func TestParseInboundMessage(t *testing.T) {
@@ -132,5 +136,22 @@ func TestExampleConfigMatchesTheStruct(t *testing.T) {
 	}
 	if c.Calls.LiveKit.TrunkName == "" || c.Calls.LiveKit.TrunkReconcileInterval == 0 {
 		t.Errorf("calls.livekit block did not parse: %+v", c.Calls.LiveKit)
+	}
+}
+
+// bridgev2 removes every joined member a full list omits, with the reason
+// "User is not in remote chat". The SIP side has no idea who is in the portal
+// on the Matrix side, so claiming the list is complete kicks the owning user
+// out of their own room on every call.
+func TestChatInfoDoesNotClaimAFullMemberList(t *testing.T) {
+	sc := &SIPClient{}
+	info, err := sc.GetChatInfo(context.Background(), &bridgev2.Portal{
+		Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: "15551234567"}},
+	})
+	if err != nil {
+		t.Fatalf("GetChatInfo: %v", err)
+	}
+	if info.Members.IsFull {
+		t.Error("the member list must not be marked full")
 	}
 }
