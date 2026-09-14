@@ -1,0 +1,42 @@
+matrix-sip-bridge
+Copyright 2026 Pierre Kisters
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this file except in compliance with the License. You may obtain a copy of the
+License at http://www.apache.org/licenses/LICENSE-2.0
+
+This product includes software developed by third parties:
+
+* maunium.net/go/mautrix (MPL-2.0) — the Matrix client and appservice library,
+  and the bridgev2 framework that provides the portals, ghosts and message
+  plumbing for the messaging half of the bridge.
+* go.mau.fi/util (MPL-2.0) — database, config-upgrade and pointer helpers used
+  alongside bridgev2.
+* github.com/golang-jwt/jwt/v5 (MIT) — signs the short-lived LiveKit access
+  tokens the twirp SIP calls are authenticated with.
+* github.com/rs/zerolog (MIT) — structured logging, the logger type bridgev2
+  hands to network connectors.
+
+Transitively, the build also links (all via mautrix and go.mau.fi/util):
+
+* github.com/lib/pq (MIT) — PostgreSQL driver.
+* github.com/mattn/go-sqlite3 (MIT) — SQLite driver, required by bridgev2's
+  mxmain even when PostgreSQL is used.
+* github.com/coder/websocket (ISC) — appservice websocket transport.
+* github.com/yuin/goldmark (MIT) — Markdown to HTML for Matrix message bodies.
+* github.com/tidwall/gjson, match, pretty, sjson (MIT) — JSON manipulation.
+* filippo.io/edwards25519 (BSD-3-Clause) — Ed25519 arithmetic for the pure-Go
+  Olm implementation.
+* golang.org/x/crypto, exp, net, sync, sys, text (BSD-3-Clause) — Go extended
+  standard library.
+* github.com/rs/xid (MIT), github.com/mattn/go-colorable (MIT),
+  github.com/mattn/go-isatty (MIT), github.com/coreos/go-systemd/v22
+  (Apache-2.0), github.com/petermattis/goid (Apache-2.0),
+  github.com/pkg/errors (BSD-2-Clause), github.com/skip2/go-qrcode (MIT),
+  go.mau.fi/zeroconfig (MPL-2.0), gopkg.in/yaml.v3 (MIT and Apache-2.0),
+  gopkg.in/natefinch/lumberjack.v2 (MIT) — logging, configuration and
+  miscellaneous support.
+
+The bridge's connector package began as a copy of the mautrix-twilio skeleton
+(github.com/mautrix/twilio, MPL-2.0), which is the same shape: phone-number
+portals, no contact list, no history.

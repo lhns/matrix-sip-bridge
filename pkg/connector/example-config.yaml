@@ -1,0 +1,73 @@
+# Connection to the Asterisk Manager Interface.
+# AMI is the bridge's only interface to Asterisk; ARI is not used.
+asterisk:
+    # host:port of the AMI listener.
+    address: asterisk.example.com:5038
+    # AMI user. It needs the "call", "message", "originate" and "system" read
+    # and write classes; anything less and MessageSend or Originate is refused
+    # with a bare "Permission denied".
+    username: matrix-sip-bridge
+    secret: ""
+    # Wrap AMI in TLS. AMI sends the secret in the clear, so this should be on
+    # unless Asterisk is reached over a private network.
+    tls: false
+    timeout: 30s
+    reconnect_interval: 5s
+
+# Text messaging: inbound SIP MESSAGE in, outbound SIP MESSAGE out.
+messages:
+    enabled: true
+    # Name of the dialplan UserEvent carrying an inbound message. The dialplan
+    # must set From, To and Body headers on it, e.g.
+    #   same => n,UserEvent(SipMessage,From: ${MESSAGE(from)},To: ${MESSAGE(to)},Body: ${MESSAGE(body)})
+    user_event: SipMessage
+    # Message URI template for outbound messages. {number} is replaced with the
+    # destination in E.164 including the leading plus.
+    outbound_to: pjsip:{number}@trunk
+    # From URI presented on outbound messages.
+    outbound_from: sip:+15551234567@example.com
+    # Advertised to Matrix clients as the room's text limit.
+    max_length: 1600
+
+# Call bridging: real media, via a ConfBridge on Asterisk and livekit-sip.
+calls:
+    enabled: true
+    # Lifetime written into the caller ghost's RTC membership. It is refreshed
+    # at half this interval while the call lasts.
+    membership_expiry: 4h
+    # How long an inbound call waits for a Matrix user to join before the SIP
+    # leg is hung up. Asterisk has already answered the channel in order to park
+    # it, so without this the caller waits in silence forever.
+    ring_timeout: 45s
+
+    livekit:
+        url: https://livekit.example.com
+        api_key: ""
+        api_secret: ""
+        timeout: 30s
+
+        # livekit-sip needs an outbound trunk object to dial through. It lives
+        # in Redis and is lost on a Redis restart, so the bridge recreates it at
+        # startup and on this interval.
+        trunk_name: matrix-sip-bridge
+        # SIP host livekit-sip dials to reach Asterisk.
+        trunk_address: asterisk.example.com
+        # Caller number livekit-sip presents to Asterisk.
+        trunk_number: "+15551234567"
+        trunk_auth_username: ""
+        trunk_auth_password: ""
+        trunk_reconcile_interval: 5m
+
+    asterisk:
+        # Prepended to the number (E.164 without the plus) to name the
+        # ConfBridge holding a call: "sip-15551234567".
+        conference_prefix: sip-
+        # Channel used to place an outbound call. {number} is replaced with the
+        # destination in E.164 including the leading plus.
+        outbound_channel: PJSIP/{number}@trunk
+        # Where an originated call lands. The extension is expected to drop the
+        # leg into ConfBridge(${CONFBRIDGE_NAME}).
+        context: matrix-sip-bridge
+        extension: bridge
+        caller_id: "+15551234567"
+        originate_timeout: 45

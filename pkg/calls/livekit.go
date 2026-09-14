@@ -1,0 +1,242 @@
+package calls
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+)
+
+// LiveKitConfig points the bridge at a LiveKit server. All of it is
+// site-specific and comes from the bridge config file.
+type LiveKitConfig struct {
+	URL       string        `yaml:"url"`
+	APIKey    string        `yaml:"api_key"`
+	APISecret string        `yaml:"api_secret"`
+	Timeout   time.Duration `yaml:"timeout"`
+
+	// TrunkName identifies the outbound trunk object the bridge reconciles.
+	TrunkName string `yaml:"trunk_name"`
+	// TrunkAddress is the SIP host livekit-sip dials to reach Asterisk.
+	TrunkAddress string `yaml:"trunk_address"`
+	// TrunkNumber is the caller number livekit-sip presents to Asterisk.
+	TrunkNumber string `yaml:"trunk_number"`
+	// TrunkAuthUsername and TrunkAuthPassword are optional SIP digest
+	// credentials for the trunk.
+	TrunkAuthUsername string `yaml:"trunk_auth_username"`
+	TrunkAuthPassword string `yaml:"trunk_auth_password"`
+	// TrunkReconcileInterval is how often the trunk is re-checked. livekit-sip
+	// keeps trunk objects in Redis, so a Redis restart silently loses them and
+	// every subsequent call fails; periodic reconciliation is the only way the
+	// bridge notices.
+	TrunkReconcileInterval time.Duration `yaml:"trunk_reconcile_interval"`
+}
+
+// LiveKitClient talks to the LiveKit SIP service over twirp.
+//
+// The JSON encoding of twirp is used rather than protobuf so that the bridge
+// does not have to vendor livekit/protocol, which pulls in most of the LiveKit
+// server SDK for three RPCs.
+type LiveKitClient struct {
+	cfg  LiveKitConfig
+	http *http.Client
+}
+
+// NewLiveKitClient builds a client. It does not contact the server.
+func NewLiveKitClient(cfg LiveKitConfig) *LiveKitClient {
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 30 * time.Second
+	}
+	return &LiveKitClient{
+		cfg:  cfg,
+		http: &http.Client{Timeout: cfg.Timeout},
+	}
+}
+
+// grants are the LiveKit access-token claims. The JSON names follow LiveKit's
+// wire format, which is lowerCamelCase and not the Go convention.
+type grants struct {
+	Video *videoGrant `json:"video,omitempty"`
+	SIP   *sipGrant   `json:"sip,omitempty"`
+}
+
+type videoGrant struct {
+	RoomAdmin  bool   `json:"roomAdmin,omitempty"`
+	RoomJoin   bool   `json:"roomJoin,omitempty"`
+	RoomCreate bool   `json:"roomCreate,omitempty"`
+	Room       string `json:"room,omitempty"`
+}
+
+type sipGrant struct {
+	Admin bool `json:"admin,omitempty"`
+	Call  bool `json:"call,omitempty"`
+}
+
+type tokenClaims struct {
+	jwt.RegisteredClaims
+	grants
+}
+
+// token mints a short-lived LiveKit access token. Tokens are minted per request
+// rather than cached: they are cheap, and a cached token outliving a rotated
+// API secret is a confusing failure mode.
+func (c *LiveKitClient) token(g grants) (string, error) {
+	now := time.Now()
+	claims := tokenClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    c.cfg.APIKey,
+			Subject:   c.cfg.APIKey,
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now.Add(-30 * time.Second)),
+			ExpiresAt: jwt.NewNumericDate(now.Add(10 * time.Minute)),
+		},
+		grants: g,
+	}
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(c.cfg.APISecret))
+}
+
+// twirpError is the JSON error body twirp returns on a non-200.
+type twirpError struct {
+	Code string `json:"code"`
+	Msg  string `json:"msg"`
+}
+
+func (e *twirpError) Error() string {
+	return fmt.Sprintf("livekit %s: %s", e.Code, e.Msg)
+}
+
+// maxResponseBytes caps how much of a LiveKit reply is read, so a misrouted
+// request that lands on some other HTTP server cannot exhaust memory.
+const maxResponseBytes = 1 << 20
+
+// call performs one twirp JSON RPC against the livekit.SIP service.
+func (c *LiveKitClient) call(ctx context.Context, method string, g grants, req, resp any) error {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal %s request: %w", method, err)
+	}
+	tok, err := c.token(g)
+	if err != nil {
+		return fmt.Errorf("mint token: %w", err)
+	}
+	url := strings.TrimSuffix(c.cfg.URL, "/") + "/twirp/livekit.SIP/" + method
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+tok)
+
+	httpResp, err := c.http.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("%s: %w", method, err)
+	}
+	defer func() { _ = httpResp.Body.Close() }()
+	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, maxResponseBytes))
+	if err != nil {
+		return fmt.Errorf("%s: read response: %w", method, err)
+	}
+	if httpResp.StatusCode != http.StatusOK {
+		var te twirpError
+		if json.Unmarshal(respBody, &te) == nil && te.Code != "" {
+			return &te
+		}
+		return fmt.Errorf("%s: http %d", method, httpResp.StatusCode)
+	}
+	if resp == nil {
+		return nil
+	}
+	if err := json.Unmarshal(respBody, resp); err != nil {
+		return fmt.Errorf("%s: decode response: %w", method, err)
+	}
+	return nil
+}
+
+// SIPOutboundTrunk is the subset of livekit.SIPOutboundTrunkInfo the bridge
+// reads or writes.
+type SIPOutboundTrunk struct {
+	SipTrunkID   string   `json:"sip_trunk_id,omitempty"`
+	Name         string   `json:"name,omitempty"`
+	Address      string   `json:"address,omitempty"`
+	Numbers      []string `json:"numbers,omitempty"`
+	AuthUsername string   `json:"auth_username,omitempty"`
+	AuthPassword string   `json:"auth_password,omitempty"`
+}
+
+type listSIPOutboundTrunkResponse struct {
+	Items []*SIPOutboundTrunk `json:"items"`
+}
+
+// ListSIPOutboundTrunk returns every outbound trunk the SIP service knows.
+func (c *LiveKitClient) ListSIPOutboundTrunk(ctx context.Context) ([]*SIPOutboundTrunk, error) {
+	var resp listSIPOutboundTrunkResponse
+	err := c.call(ctx, "ListSIPOutboundTrunk", grants{SIP: &sipGrant{Admin: true}}, struct{}{}, &resp)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Items, nil
+}
+
+type createSIPOutboundTrunkRequest struct {
+	Trunk *SIPOutboundTrunk `json:"trunk"`
+}
+
+// CreateSIPOutboundTrunk registers an outbound trunk.
+func (c *LiveKitClient) CreateSIPOutboundTrunk(ctx context.Context, trunk *SIPOutboundTrunk) (*SIPOutboundTrunk, error) {
+	var resp SIPOutboundTrunk
+	err := c.call(ctx, "CreateSIPOutboundTrunk", grants{SIP: &sipGrant{Admin: true}},
+		&createSIPOutboundTrunkRequest{Trunk: trunk}, &resp)
+	if err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// CreateSIPParticipantRequest asks livekit-sip to place a SIP call and put the
+// far end into a LiveKit room.
+type CreateSIPParticipantRequest struct {
+	SipTrunkID          string            `json:"sip_trunk_id"`
+	SipCallTo           string            `json:"sip_call_to"`
+	RoomName            string            `json:"room_name"`
+	ParticipantIdentity string            `json:"participant_identity"`
+	ParticipantName     string            `json:"participant_name,omitempty"`
+	ParticipantMetadata string            `json:"participant_metadata,omitempty"`
+	Headers             map[string]string `json:"headers,omitempty"`
+	WaitUntilAnswered   bool              `json:"wait_until_answered,omitempty"`
+}
+
+// SIPParticipant is the subset of livekit.SIPParticipantInfo the bridge keeps.
+type SIPParticipant struct {
+	ParticipantID       string `json:"participant_id,omitempty"`
+	ParticipantIdentity string `json:"participant_identity,omitempty"`
+	RoomName            string `json:"room_name,omitempty"`
+	SipCallID           string `json:"sip_call_id,omitempty"`
+}
+
+// CreateSIPParticipant dials out through livekit-sip.
+//
+// The bridge always originates rather than letting LiveKit accept an inbound
+// leg through a dispatch rule, because only this API lets the participant
+// identity be chosen; see LiveKitIdentity.
+func (c *LiveKitClient) CreateSIPParticipant(ctx context.Context, req *CreateSIPParticipantRequest) (*SIPParticipant, error) {
+	var resp SIPParticipant
+	g := grants{
+		SIP: &sipGrant{Call: true},
+		Video: &videoGrant{
+			RoomJoin:   true,
+			RoomCreate: true,
+			RoomAdmin:  true,
+			Room:       req.RoomName,
+		},
+	}
+	if err := c.call(ctx, "CreateSIPParticipant", g, req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}

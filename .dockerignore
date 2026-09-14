@@ -1,0 +1,21 @@
+.git
+.github
+.gitignore
+.dockerignore
+Dockerfile
+Makefile
+README.md
+LICENSE
+NOTICE
+docs/
+matrix-sip-bridge
+matrix-sip-bridge.exe
+*.exe
+*.test
+*.out
+
+# Never ship a real deployment's config or tokens into the image.
+config.yaml
+registration.yaml
+*.local.yaml
+*.env
