@@ -25,7 +25,10 @@ type LiveKitConfig struct {
 	TrunkName string `yaml:"trunk_name"`
 	// TrunkAddress is the SIP host livekit-sip dials to reach the conference.
 	TrunkAddress string `yaml:"trunk_address"`
-	// TrunkNumber is the caller number livekit-sip presents.
+	// TrunkNumber is the From user livekit-sip presents. LiveKit does not
+	// require it to be a number, and a SIP server that cannot identify
+	// livekit-sip by address may have to identify it by this instead; see
+	// example-config.yaml.
 	TrunkNumber string `yaml:"trunk_number"`
 	// TrunkAuthUsername and TrunkAuthPassword are optional SIP digest
 	// credentials for the trunk.

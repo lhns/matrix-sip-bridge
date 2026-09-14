@@ -88,7 +88,12 @@ calls:
         trunk_name: matrix-sip-bridge
         # SIP host livekit-sip dials to reach the conference.
         trunk_address: pbx.example.com
-        # Caller number livekit-sip presents.
+        # The From user livekit-sip presents. LiveKit passes it through
+        # unchanged, so it need not be a number -- and when the SIP server
+        # identifies a non-registering caller by the From user rather than by
+        # address (Asterisk chan_sip does, and rejects an unmatched INVITE 403
+        # before any credentials are checked), this must be the name it knows
+        # livekit-sip by instead.
         trunk_number: "+15551234567"
         trunk_auth_username: ""
         trunk_auth_password: ""
