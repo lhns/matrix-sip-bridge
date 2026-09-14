@@ -16,6 +16,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 
+	"github.com/lhns/matrix-sip-bridge/pkg/calls"
 	"github.com/lhns/matrix-sip-bridge/pkg/phonenum"
 	"github.com/lhns/matrix-sip-bridge/pkg/siptransport"
 )
@@ -72,6 +73,12 @@ func (sc *SIPClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (*b
 				Membership:  event.MembershipJoin,
 				PowerLevel:  ptr.Ptr(50),
 			}},
+			// The Matrix user is not in this list — bridgev2 leaves it at
+			// users_default — so the call button has to be unlocked by
+			// lowering the event instead of raising the user.
+			PowerLevels: &bridgev2.PowerLevelOverrides{
+				Events: calls.MembershipPowerLevels(),
+			},
 		},
 	}, nil
 }

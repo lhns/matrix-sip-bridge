@@ -19,6 +19,30 @@ var CallMemberEventType = event.Type{
 	Class: event.StateEventType,
 }
 
+// CallMemberStableEventType is the name the membership state event takes once
+// MSC3401 lands. It is not sent by the bridge, only permitted: which of the
+// two a client writes is the client's choice, and a portal that allows one but
+// not the other offers no call button to half of them.
+var CallMemberStableEventType = event.Type{
+	Type:  "m.call.member",
+	Class: event.StateEventType,
+}
+
+// MembershipPowerLevels is the power level override a portal room needs for
+// its Matrix users to be able to start or join a call at all.
+//
+// Element only shows the call button in a room where the local user may send
+// the RTC membership state event. A bridge portal has state_default 50 and
+// leaves the owning user at users_default 0, so without this there is no way
+// to place or answer a call — and no error either, just a missing button. A
+// room Element itself creates carries exactly this override.
+func MembershipPowerLevels() map[event.Type]int {
+	return map[event.Type]int{
+		CallMemberEventType:       0,
+		CallMemberStableEventType: 0,
+	}
+}
+
 // CallMemberContent is the subset of the membership content the bridge reads.
 //
 // The event has had two shapes: the original MSC3401 one with a top-level

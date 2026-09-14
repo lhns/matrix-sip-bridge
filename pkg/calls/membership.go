@@ -2,6 +2,7 @@ package calls
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -24,17 +25,21 @@ func deviceIDFor(callID string) string {
 }
 
 // publishGhostMembership announces the caller as a participant of the room's
-// RTC session, which is what makes Element ring.
+// RTC session, which is what makes the call joinable. It returns the event ID
+// so the ring notification can reference the membership it belongs to.
+//
+// Joinable is not ringing: a client shows an incoming call only once the
+// MSC4075 notification arrives as well. See publishRingNotification.
 //
 // The event is sent as the ghost, not by the bot on its behalf:
 // checkRtcMembershipData rejects a membership whose member.user_id is not the
 // sender, so appservice masquerading is load-bearing here.
 //
 // There is no refresh timer; see Config.MembershipExpiry.
-func (s *Subsystem) publishGhostMembership(ctx context.Context, call *database.Call) error {
+func (s *Subsystem) publishGhostMembership(ctx context.Context, call *database.Call) (id.EventID, error) {
 	ghost, err := s.ghostFor(ctx, call.PortalID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	userID := ghost.Intent.GetMXID()
 	deviceID := deviceIDFor(call.CallID)
@@ -42,13 +47,64 @@ func (s *Subsystem) publishGhostMembership(ctx context.Context, call *database.C
 
 	call.LKIdentity = LiveKitIdentity(userID.String(), deviceID, membershipID)
 	if err := s.db.Call.Update(ctx, call); err != nil {
-		return err
+		return "", err
 	}
 	s.warnIfEncrypted(ctx, ghost, call.RoomID)
 	stateKey := s.stateKeyFor(ctx, ghost, call.RoomID, userID, deviceID)
 	content := ghostMembership(userID, deviceID, membershipID, s.cfg.MembershipExpiry)
-	_, err = ghost.Intent.SendState(ctx, call.RoomID, CallMemberEventType, stateKey, content, time.Time{})
-	return err
+	resp, err := ghost.Intent.SendState(ctx, call.RoomID, CallMemberEventType, stateKey, content, time.Time{})
+	if err != nil {
+		return "", err
+	}
+	return resp.EventID, nil
+}
+
+// publishRingNotification sends the event that actually makes a client ring.
+//
+// It is sent as the ghost for the same reason the membership is: a client that
+// sees a notification whose sender is not the RTC member it relates to has no
+// caller to display, and the decline it sends back would not refer to anyone.
+//
+// Nothing retracts this event. Its lifetime is the ring timeout, so the ring
+// stops on its own at exactly the moment the bridge gives up on the call.
+func (s *Subsystem) publishRingNotification(ctx context.Context, call *database.Call, membership id.EventID) (id.EventID, error) {
+	ghost, err := s.ghostFor(ctx, call.PortalID)
+	if err != nil {
+		return "", err
+	}
+	content := ringNotification(time.Now(), s.cfg.RingTimeout, membership, s.humanMembers(ctx, call.RoomID))
+	resp, err := ghost.Intent.SendMessage(ctx, call.RoomID, RtcNotificationEventType, content, nil)
+	if err != nil {
+		return "", err
+	}
+	return resp.EventID, nil
+}
+
+// humanMembers lists the room members that are neither ghosts nor the bridge
+// bot, which is who the ring notification mentions.
+func (s *Subsystem) humanMembers(ctx context.Context, roomID id.RoomID) []id.UserID {
+	members, err := s.br.Matrix.GetMembers(ctx, roomID)
+	if err != nil {
+		s.log.Warn().Err(err).Stringer("room_id", roomID).
+			Msg("Could not list room members; the ring notification will mention nobody and may not push")
+		return nil
+	}
+	botMXID := s.br.Bot.GetMXID()
+	users := make([]id.UserID, 0, len(members))
+	for userID, member := range members {
+		if member == nil || member.Membership != event.MembershipJoin {
+			continue
+		}
+		if userID == botMXID {
+			continue
+		}
+		if _, isGhost := s.br.Matrix.ParseGhostMXID(userID); isGhost {
+			continue
+		}
+		users = append(users, userID)
+	}
+	slices.Sort(users)
+	return users
 }
 
 // retractGhostMembership publishes the empty content that ends a membership.

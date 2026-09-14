@@ -14,6 +14,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/database"
 	"github.com/lhns/matrix-sip-bridge/pkg/phonenum"
@@ -110,6 +111,14 @@ type Subsystem struct {
 	answeredMu sync.Mutex
 	answered   map[string]chan struct{}
 
+	// declined carries the "a Matrix user rejected the call" signal, and
+	// notifies names the ring notification each ringing call sent, so a
+	// decline can be matched to the call it refers to rather than to whatever
+	// is ringing in the room.
+	declinedMu sync.Mutex
+	declined   map[string]chan struct{}
+	notifies   map[id.EventID]string
+
 	// legs keeps the control leg of a call that still has one, so the bridge
 	// can hang it up.
 	legsMu sync.Mutex
@@ -142,6 +151,8 @@ func New(cfg Config, br *bridgev2.Bridge, loginID networkid.UserLoginID, sip Tel
 		db:       db,
 		log:      log,
 		answered: make(map[string]chan struct{}),
+		declined: make(map[string]chan struct{}),
+		notifies: make(map[id.EventID]string),
 		legs:     make(map[string]OutboundLeg),
 		seen:     make(map[string]bool),
 	}
@@ -182,6 +193,10 @@ func (s *Subsystem) Start(ctx context.Context, reg EventRegistrar) error {
 	// Decrypted events are re-dispatched through the same processor, so this
 	// handler also sees anything that arrived encrypted.
 	reg.On(CallMemberEventType, s.handleCallMember)
+	// Without this the bridge cannot tell a rejected call from an unanswered
+	// one, and a caller the user declined keeps ringing until RingTimeout.
+	reg.On(RtcDeclineEventType, s.handleRtcDecline)
+	reg.On(RtcDeclineStableEventType, s.handleRtcDecline)
 	return nil
 }
 
@@ -299,8 +314,18 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, portalID, conference s
 	if err := s.db.Call.Insert(ctx, call); err != nil {
 		return nil, fmt.Errorf("insert call: %w", err)
 	}
-	if err := s.publishGhostMembership(ctx, call); err != nil {
+	membership, err := s.publishGhostMembership(ctx, call)
+	if err != nil {
 		return nil, fmt.Errorf("publish ghost RTC membership: %w", err)
+	}
+	// A failed notification is not a failed call: the membership alone still
+	// lets someone who opens the room join it, which is better than declining
+	// a caller that could have been answered.
+	if notify, err := s.publishRingNotification(ctx, call, membership); err != nil {
+		s.log.Warn().Err(err).Str("call_id", call.CallID).
+			Msg("Failed to send the ring notification; Matrix clients will not ring for this call")
+	} else {
+		s.rememberNotification(notify, call.CallID)
 	}
 	s.log.Info().
 		Str("call_id", call.CallID).
@@ -314,9 +339,18 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, portalID, conference s
 func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg InboundLeg, log zerolog.Logger) {
 	joined := s.answerChannel(call.CallID)
 	defer s.forgetAnswerChannel(call.CallID)
+	declined := s.declineChannel(call.CallID)
+	defer s.forgetDeclineChannel(call.CallID)
 
 	select {
 	case <-joined:
+	case <-declined:
+		log.Info().Msg("Matrix declined the call")
+		// 486 rather than 480: the difference is what the caller's network
+		// plays them, and a rejection is not an absence.
+		_ = leg.Reject(486, "Busy Here")
+		_ = s.endCall(ctx, call)
+		return
 	case <-leg.Done():
 		log.Info().Msg("Caller hung up before Matrix answered")
 		_ = s.endCall(ctx, call)
@@ -363,6 +397,65 @@ func (s *Subsystem) answerChannel(callID string) chan struct{} {
 	return ch
 }
 
+// declineChannel returns the channel closed when a Matrix user rejects this
+// call, and rememberNotification/forgetNotification maintain the map from the
+// ring notification to the call it announced.
+func (s *Subsystem) declineChannel(callID string) chan struct{} {
+	s.declinedMu.Lock()
+	defer s.declinedMu.Unlock()
+	ch, ok := s.declined[callID]
+	if !ok {
+		ch = make(chan struct{})
+		s.declined[callID] = ch
+	}
+	return ch
+}
+
+func (s *Subsystem) forgetDeclineChannel(callID string) {
+	s.declinedMu.Lock()
+	defer s.declinedMu.Unlock()
+	delete(s.declined, callID)
+}
+
+func (s *Subsystem) rememberNotification(notify id.EventID, callID string) {
+	s.declinedMu.Lock()
+	defer s.declinedMu.Unlock()
+	s.notifies[notify] = callID
+}
+
+func (s *Subsystem) forgetNotification(callID string) {
+	s.declinedMu.Lock()
+	defer s.declinedMu.Unlock()
+	for notify, owner := range s.notifies {
+		if owner == callID {
+			delete(s.notifies, notify)
+		}
+	}
+}
+
+// signalDecline releases the goroutine holding the inbound leg of the call the
+// given notification announced. An unknown notification is ignored: it names a
+// call from a previous run or another bridge, and rejecting whatever happens
+// to be ringing now would hang up on the wrong caller.
+func (s *Subsystem) signalDecline(notify id.EventID) (string, bool) {
+	s.declinedMu.Lock()
+	defer s.declinedMu.Unlock()
+	callID, ok := s.notifies[notify]
+	if !ok {
+		return "", false
+	}
+	ch, ok := s.declined[callID]
+	if !ok {
+		return callID, false
+	}
+	select {
+	case <-ch:
+	default:
+		close(ch)
+	}
+	return callID, true
+}
+
 func (s *Subsystem) forgetAnswerChannel(callID string) {
 	s.answeredMu.Lock()
 	defer s.answeredMu.Unlock()
@@ -399,6 +492,7 @@ func (s *Subsystem) endCall(ctx context.Context, call *database.Call) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	s.forgetSeen(call.CallID)
+	s.forgetNotification(call.CallID)
 	s.signalAnswer(call.CallID)
 	if leg := s.takeLeg(call.CallID); leg != nil {
 		if err := leg.Hangup(ctx); err != nil {
@@ -451,6 +545,8 @@ func (s *Subsystem) portalForNumber(ctx context.Context, portalID string) (*brid
 		if err := portal.CreateMatrixRoom(ctx, source, nil); err != nil {
 			return nil, fmt.Errorf("create room for %s: %w", portalID, err)
 		}
+	} else {
+		s.reapplyChatInfo(ctx, portal, source)
 	}
 	// Every call, not just the first: GetChatInfo lists only the ghost, so
 	// bridgev2 leaves the Matrix user to UserLogin.MarkInPortal, which runs
@@ -458,6 +554,24 @@ func (s *Subsystem) portalForNumber(ctx context.Context, portalID string) (*brid
 	// rechecks the user's membership.
 	s.ensureUserInPortal(ctx, portal, source)
 	return portal, nil
+}
+
+// reapplyChatInfo pushes the connector's room description into a portal that
+// already exists.
+//
+// It is what repairs rooms created before a change to GetChatInfo: bridgev2
+// applies the power level overrides while creating a room and never revisits
+// them, so a portal made without them would stay uncallable forever. Running
+// it per call rather than once at startup also covers a room whose power
+// levels someone edited by hand.
+func (s *Subsystem) reapplyChatInfo(ctx context.Context, portal *bridgev2.Portal, source *bridgev2.UserLogin) {
+	info, err := source.Client.GetChatInfo(ctx, portal)
+	if err != nil {
+		s.log.Warn().Err(err).Str("portal_id", string(portal.ID)).
+			Msg("Could not refresh the portal description")
+		return
+	}
+	portal.UpdateInfo(ctx, info, source, nil, time.Time{})
 }
 
 // sourceLogin returns the login every portal is created on behalf of.
@@ -514,6 +628,32 @@ func (s *Subsystem) handleCallMember(ctx context.Context, evt *event.Event) {
 	if err := s.onMatrixJoinedCall(ctx, portal, content, log); err != nil {
 		log.Err(err).Msg("Failed to handle Matrix RTC join")
 	}
+}
+
+// handleRtcDecline rejects the inbound call a Matrix client declined.
+//
+// The decline is matched by the notification event it relates to rather than
+// by the room, so a decline sent late — by a second device, or for a call that
+// already ended — cannot reject a different call in the same portal.
+func (s *Subsystem) handleRtcDecline(ctx context.Context, evt *event.Event) {
+	if _, isGhost := s.br.Matrix.ParseGhostMXID(evt.Sender); isGhost {
+		return
+	}
+	if evt.Sender == s.br.Bot.GetMXID() {
+		return
+	}
+	notify, ok := declineTarget(evt.Content.VeryRaw)
+	if !ok {
+		return
+	}
+	callID, signalled := s.signalDecline(notify)
+	if !signalled {
+		return
+	}
+	s.log.Info().
+		Str("call_id", callID).
+		Stringer("sender", evt.Sender).
+		Msg("Matrix declined the call")
 }
 
 // onMatrixJoinedCall answers a ringing inbound call, or places an outbound one.
@@ -643,7 +783,10 @@ func (s *Subsystem) Dial(ctx context.Context, portal *bridgev2.Portal) (*databas
 	}
 	// The ghost membership goes out before the phone rings, so the Matrix side
 	// has something to join while it does.
-	if err := s.publishGhostMembership(ctx, call); err != nil {
+	// No ring notification for an outbound call: the Matrix side started it
+	// and is already in the session, so notifying it would ring the caller's
+	// own phone.
+	if _, err := s.publishGhostMembership(ctx, call); err != nil {
 		s.log.Warn().Err(err).Str("call_id", call.CallID).
 			Msg("Failed to publish ghost RTC membership for outbound call")
 	}

@@ -77,6 +77,7 @@ What the bridge sends back, in order:
 | `200 OK` with SDP | **only** once a Matrix user has actually joined the RTC session |
 | `404 Not Found` | the conference header is missing, or does not carry the configured prefix |
 | `480 Temporarily Unavailable` | nobody joined within `calls.ring_timeout` (45s by default) |
+| `486 Busy Here` | a Matrix client declined the call |
 | `488 Not Acceptable Here` | the INVITE carried no SDP, or offered neither PCMU nor PCMA |
 | `500` / `503` | the bridge could not set the call up, or calls are disabled |
 
@@ -230,8 +231,8 @@ sender's name, which wastes a length-limited message.
 ### Double puppeting is required for calls
 
 A portal invite the user has not accepted makes calls unreachable rather than
-untidy: the RTC membership that rings is a state event inside the portal room,
-and a non-member cannot see it. The bridge therefore joins the user itself
+untidy: the RTC membership and the ring notification are events inside the
+portal room, and a non-member cannot see them. The bridge therefore joins the user itself
 before every call, which needs double puppeting:
 
 ```yaml
@@ -305,8 +306,9 @@ pkg/siptransport/          the SIP user agent: sipgo, no media stack
   sdp.go                     the answer that must not read as hold
 pkg/calls/                 the call subsystem, independent of bridgev2 plumbing
   subsystem.go               call lifecycle, ring, answer, teardown watch
-  membership.go              publishing and sweeping the ghost RTC membership
+  membership.go              publishing the ghost RTC membership and the ring
   rtc.go                     MSC3401 call.member parsing
+  notification.go            MSC4075 ring notification, MSC4310 decline
   identity.go                MSC4195 LiveKit room-name and identity derivation
   livekit.go                 twirp JSON client for the LiveKit SIP and room APIs
   trunk.go                   outbound-trunk reconciliation (Redis loses it)
