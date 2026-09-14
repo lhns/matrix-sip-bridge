@@ -84,7 +84,18 @@ func (c *InboundCall) Answer() error {
 		_ = c.Reject(488, "Not Acceptable Here")
 		return err
 	}
-	return c.dlg.RespondSDP(answer)
+	if err := c.dlg.RespondSDP(answer); err != nil && !isMissingACK(err) {
+		return err
+	}
+	return nil
+}
+
+// isMissingACK reports whether sipgo gave up waiting for the ACK to our 200.
+// The 200 is already on the wire by then, and the ACK and the BYE behind it
+// are dispatched on separate goroutines, so a leg the dialplan hangs up at
+// once can end first. The end of the leg belongs to Done, not to Answer.
+func isMissingACK(err error) bool {
+	return strings.Contains(err.Error(), "No ACK received")
 }
 
 // Reject answers with a failure status and ends the leg.

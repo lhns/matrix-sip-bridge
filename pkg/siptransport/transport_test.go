@@ -551,3 +551,74 @@ func TestInboundMessageHandlerRunsOnALiveContext(t *testing.T) {
 		t.Errorf("context was %v in the MESSAGE handler", err)
 	}
 }
+
+// The dialplan's gosub hangs the leg up the moment it has the answer, and
+// sipgo dispatches every inbound request on its own goroutine: the BYE can be
+// handled before the ACK that was sent before it. sipgo reports that as a
+// failed answer, and treating it as one would retract the Matrix side of a
+// call that was in fact bridged.
+func TestInboundCallAnswerSurvivesAByeBeforeTheAck(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	joined := make(chan struct{})
+	answerErr := make(chan error, 1)
+	tr, bridgeAddr := startBridge(t, ctx, nil)
+	tr.OnInvite(func(hctx context.Context, call *InboundCall) {
+		if err := call.Ringing(); err != nil {
+			t.Errorf("Ringing: %v", err)
+			return
+		}
+		<-joined
+		answerErr <- call.Answer()
+		<-call.Done()
+	})
+
+	peer := newFakePeer(t, ctx)
+	var ringingOnce sync.Once
+	dlg, _, err := peer.invite(ctx, bridgeAddr, nil, offerSDP("127.0.0.1", 40000),
+		func(res *sip.Response) {
+			if res.StatusCode == 180 {
+				ringingOnce.Do(func() { close(joined) })
+			}
+		})
+	if err != nil {
+		t.Fatalf("INVITE: %v", err)
+	}
+	defer func() { _ = dlg.Close() }()
+	if dlg.InviteResponse.StatusCode != 200 {
+		t.Fatalf("final response = %d, want 200", dlg.InviteResponse.StatusCode)
+	}
+
+	// Sent through the dialog's transaction layer rather than dlg.Bye, which
+	// refuses to run before the ACK. Holding the ACK back until the BYE has
+	// been answered is what makes the ordering deterministic here.
+	bye := sip.NewRequest(sip.BYE, dlg.InviteResponse.Contact().Address)
+	bye.SetTransport("TCP")
+	bye.SetDestination(bridgeAddr)
+	byeTx, err := dlg.TransactionRequest(ctx, bye)
+	if err != nil {
+		t.Fatalf("BYE: %v", err)
+	}
+	defer byeTx.Terminate()
+	select {
+	case res := <-byeTx.Responses():
+		if res.StatusCode != 200 {
+			t.Fatalf("BYE response = %d, want 200", res.StatusCode)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("the bridge never answered the BYE")
+	}
+
+	select {
+	case err := <-answerErr:
+		if err != nil {
+			t.Fatalf("Answer: %v; the call was answered and then hung up, which is the normal end of the leg", err)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("Answer never returned after the leg ended")
+	}
+	if err := dlg.Ack(ctx); err != nil {
+		t.Fatalf("ACK: %v", err)
+	}
+}
