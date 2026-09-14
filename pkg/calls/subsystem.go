@@ -245,6 +245,10 @@ func (s *Subsystem) HandleInboundCall(ctx context.Context, leg InboundLeg) {
 
 	if err := leg.Ringing(); err != nil {
 		log.Err(err).Msg("Failed to send 180 Ringing")
+		// A branch of a parallel Dial() that never gets a final response is
+		// held until the transaction times out, so every failure here ends
+		// with a definitive status rather than a dangling leg.
+		_ = leg.Reject(500, "Server Internal Error")
 		_ = s.endCall(ctx, call)
 		return
 	}

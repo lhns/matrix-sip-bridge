@@ -28,6 +28,11 @@ import (
 // refused outright rather than written to a socket that will drop it.
 const maxPacketSize = 20480
 
+// messageHandlerTimeout bounds an inbound MESSAGE handler. Past Timer F the
+// far end has given up on the transaction, so a reply after that reaches
+// nobody and the handler is only holding the connection open.
+const messageHandlerTimeout = 32 * time.Second
+
 // MessageHandler is called for each inbound SIP MESSAGE that passed the
 // content-type check. Returning an error makes the bridge reply 500.
 type MessageHandler func(ctx context.Context, msg InboundMessage) error
@@ -64,6 +69,16 @@ type Transport struct {
 
 	listening  atomic.Bool
 	registered atomic.Bool
+
+	// baseCtx is the transport's own lifetime, and the parent of every
+	// context handed to a request handler.
+	//
+	// sipgo's sip.ServerTransactionContext cannot be used for that: it
+	// cancels the context it just created whenever the termination hook was
+	// registered successfully, so it returns a context that is already done.
+	// Handlers then ran their whole setup on a dead context.
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
 
 	closeOnce sync.Once
 }
@@ -107,16 +122,19 @@ func New(cfg Config, log zerolog.Logger) (*Transport, error) {
 		Host:   publicHost,
 		Port:   publicPort,
 	}}
+	baseCtx, baseCancel := context.WithCancel(context.Background())
 	t := &Transport{
-		cfg:       cfg,
-		log:       log,
-		ua:        ua,
-		srv:       srv,
-		cli:       cli,
-		dlg:       sipgo.NewDialogServerCache(cli, contact),
-		dua:       &sipgo.DialogUA{Client: cli, ContactHDR: contact},
-		contact:   contact,
-		mediaHost: mediaHost,
+		cfg:        cfg,
+		log:        log,
+		ua:         ua,
+		srv:        srv,
+		cli:        cli,
+		dlg:        sipgo.NewDialogServerCache(cli, contact),
+		dua:        &sipgo.DialogUA{Client: cli, ContactHDR: contact},
+		contact:    contact,
+		mediaHost:  mediaHost,
+		baseCtx:    baseCtx,
+		baseCancel: baseCancel,
 	}
 	srv.OnInvite(t.handleInvite)
 	srv.OnAck(t.handleAck)
@@ -185,6 +203,7 @@ func (t *Transport) serve(ctx context.Context, serve func() error, closer io.Clo
 // Close releases the user agent. Run's context cancellation does this.
 func (t *Transport) Close() {
 	t.closeOnce.Do(func() {
+		t.baseCancel()
 		_ = t.srv.Close()
 		_ = t.cli.Close()
 		_ = t.ua.Close()
