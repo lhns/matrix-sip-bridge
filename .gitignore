@@ -1,0 +1,30 @@
+# Binaries
+matrix-sip-bridge
+matrix-sip-bridge.exe
+*.exe
+*.so
+*.dylib
+
+# Test
+*.test
+*.out
+coverage.html
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime state: these contain the homeserver tokens and the AMI secret.
+config.yaml
+registration.yaml
+*.local.yaml
+*.env
