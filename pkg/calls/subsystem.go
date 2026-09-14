@@ -16,42 +16,70 @@ import (
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
-	"github.com/lhns/matrix-sip-bridge/pkg/asteriskami"
 	"github.com/lhns/matrix-sip-bridge/pkg/database"
 	"github.com/lhns/matrix-sip-bridge/pkg/phonenum"
 )
 
-// AsteriskCallConfig is the dialplan contract between the bridge and Asterisk.
-// Every value is site-specific.
-type AsteriskCallConfig struct {
-	// ConferencePrefix is prepended to the portal ID to name the ConfBridge
-	// that holds a call, e.g. prefix "sip-" gives "sip-15551234567".
-	ConferencePrefix string `yaml:"conference_prefix"`
-	// OutboundChannel is the Asterisk channel string used to place a call.
-	// "{number}" is replaced with the E.164 destination including the plus.
-	OutboundChannel string `yaml:"outbound_channel"`
-	// Context, Extension and CallerID are where an originated call lands in the
-	// dialplan. The extension is expected to drop the leg into the ConfBridge
-	// named by the CONFBRIDGE_NAME channel variable.
-	Context   string `yaml:"context"`
-	Extension string `yaml:"extension"`
-	CallerID  string `yaml:"caller_id"`
-	// OriginateTimeout is how long Asterisk waits for the far end to answer.
-	OriginateTimeout int `yaml:"originate_timeout"`
+// InboundLeg is the control leg of an inbound call as the SIP transport
+// presents it.
+//
+// It is not the call, and its end is not the call ending: the dialplan hangs
+// it up moments after it is answered so the caller falls through into the
+// conference.
+type InboundLeg interface {
+	// From is the caller's URI, for logging only. The conference is what
+	// identifies the conversation.
+	From() string
+	// Conference is the conference the caller will land in.
+	Conference() string
+	Ringing() error
+	Answer() error
+	Reject(code int, reason string) error
+	// Done is closed when the leg is gone, by BYE, CANCEL or failure.
+	Done() <-chan struct{}
+}
+
+// OutboundLeg is the control leg of a call the bridge asked the SIP server to
+// place.
+type OutboundLeg interface {
+	Hangup(ctx context.Context) error
+	Done() <-chan struct{}
+}
+
+// Telephony is the SIP transport as the call subsystem uses it.
+//
+// Only outbound INVITE is needed here; inbound calls arrive through
+// HandleInboundCall, which the transport's INVITE handler calls.
+type Telephony interface {
+	Invite(ctx context.Context, to, conference string) (OutboundLeg, error)
 }
 
 // Config configures the call subsystem.
 type Config struct {
-	Enabled  bool               `yaml:"enabled"`
-	LiveKit  LiveKitConfig      `yaml:"livekit"`
-	Asterisk AsteriskCallConfig `yaml:"asterisk"`
-	// MembershipExpiry is the lifetime written into the ghost's RTC membership.
-	// Clients treat an expired membership as gone, so it is refreshed at half
-	// this interval for as long as the call lasts.
+	Enabled bool          `yaml:"enabled"`
+	LiveKit LiveKitConfig `yaml:"livekit"`
+
+	// ConferencePrefix is prepended to the portal ID to name the conference
+	// holding a call, e.g. prefix "sip-" gives "sip-15551234567". It is also
+	// how the bridge recognises a conference as its own and ignores the rest.
+	ConferencePrefix string `yaml:"conference_prefix"`
+	// OutboundURI is the SIP URI an outbound control leg is sent to.
+	// "{number}" is replaced with the E.164 destination including the plus.
+	OutboundURI string `yaml:"outbound_uri"`
+
+	// MembershipExpiry is the lifetime written into the ghost's RTC
+	// membership. It is not a liveness signal and is never refreshed: the
+	// membership is published when a call starts and retracted when it ends,
+	// so this only bounds how long a membership left behind by a crashed
+	// bridge lingers before clients discard it.
 	MembershipExpiry time.Duration `yaml:"membership_expiry"`
 	// RingTimeout is how long an inbound call waits for a Matrix user to join
-	// the RTC session before the SIP leg is hung up.
+	// the RTC session before the leg is declined.
 	RingTimeout time.Duration `yaml:"ring_timeout"`
+	// ParticipantPollInterval is how often LiveKit is asked whether the SIP
+	// participant is still in the room. That is the only signal the bridge has
+	// that a call ended; see runParticipantWatcher.
+	ParticipantPollInterval time.Duration `yaml:"participant_poll_interval"`
 }
 
 // Subsystem bridges calls. It is deliberately not a bridgev2 concept: bridgev2
@@ -61,34 +89,51 @@ type Config struct {
 type Subsystem struct {
 	cfg Config
 	br  *bridgev2.Bridge
-	ami *asteriskami.Client
+	sip Telephony
 	lk  *LiveKitClient
 	db  *database.Database
 	log zerolog.Logger
 
 	trunkID atomic.Pointer[string]
 
-	// refreshers keeps the membership-refresh cancel func per call ID.
-	refreshersMu sync.Mutex
-	refreshers   map[string]context.CancelFunc
+	// answered carries the "a Matrix user joined" signal from the call.member
+	// handler to the goroutine holding an inbound leg open.
+	answeredMu sync.Mutex
+	answered   map[string]chan struct{}
+
+	// legs keeps the control leg of a call that still has one, so the bridge
+	// can hang it up.
+	legsMu sync.Mutex
+	legs   map[string]OutboundLeg
+
+	// seen records that a call's LiveKit participant has been observed at
+	// least once, so that "not in the room" means "left" rather than "not
+	// joined yet". Teardown depends on the difference.
+	seenMu sync.Mutex
+	seen   map[string]bool
 }
 
 // New builds the subsystem. Start does the work.
-func New(cfg Config, br *bridgev2.Bridge, ami *asteriskami.Client, db *database.Database, log zerolog.Logger) *Subsystem {
+func New(cfg Config, br *bridgev2.Bridge, sip Telephony, db *database.Database, log zerolog.Logger) *Subsystem {
 	if cfg.MembershipExpiry <= 0 {
-		cfg.MembershipExpiry = 4 * time.Hour
+		cfg.MembershipExpiry = 6 * time.Hour
 	}
 	if cfg.RingTimeout <= 0 {
 		cfg.RingTimeout = 45 * time.Second
 	}
+	if cfg.ParticipantPollInterval <= 0 {
+		cfg.ParticipantPollInterval = 10 * time.Second
+	}
 	return &Subsystem{
-		cfg:        cfg,
-		br:         br,
-		ami:        ami,
-		lk:         NewLiveKitClient(cfg.LiveKit),
-		db:         db,
-		log:        log,
-		refreshers: make(map[string]context.CancelFunc),
+		cfg:      cfg,
+		br:       br,
+		sip:      sip,
+		lk:       NewLiveKitClient(cfg.LiveKit),
+		db:       db,
+		log:      log,
+		answered: make(map[string]chan struct{}),
+		legs:     make(map[string]OutboundLeg),
+		seen:     make(map[string]bool),
 	}
 }
 
@@ -109,13 +154,18 @@ func (s *Subsystem) Start(ctx context.Context, reg EventRegistrar) error {
 	if err := s.db.Upgrade(ctx); err != nil {
 		return fmt.Errorf("upgrade call tables: %w", err)
 	}
-	// Call state lives in Asterisk and LiveKit; this table is only a cache of
-	// it, and after a restart every channel it names is gone.
+	// Call state lives in LiveKit and the SIP server; this table is only a
+	// cache of it, and after a restart every leg it names is gone. The rows
+	// are read before they are cleared, because they name the RTC memberships
+	// a previous run may have left behind.
+	stale, err := s.db.Call.GetAllActive(ctx)
+	if err != nil {
+		return fmt.Errorf("list calls from the last run: %w", err)
+	}
 	if err := s.db.Call.EndAll(ctx); err != nil {
 		return fmt.Errorf("clear stale calls: %w", err)
 	}
-
-	s.ami.OnEvent(s.handleAMIEvent)
+	s.sweepStaleMemberships(ctx, stale)
 
 	// The whole design rests on this line. appservice.EventProcessor dispatches
 	// on the exact event.Type struct including its Class, so an arbitrary state
@@ -131,19 +181,20 @@ func (s *Subsystem) Run(ctx context.Context) {
 	if !s.cfg.Enabled {
 		return
 	}
+	go s.runParticipantWatcher(ctx)
 	s.runTrunkReconciler(ctx)
 }
 
-// conferenceFor returns the ConfBridge name for a portal.
+// conferenceFor returns the conference name for a portal.
 func (s *Subsystem) conferenceFor(portalID string) string {
-	return s.cfg.Asterisk.ConferencePrefix + portalID
+	return s.cfg.ConferencePrefix + portalID
 }
 
 // portalIDFromConference is the inverse of conferenceFor. It returns false for
-// a conference the bridge does not own, so unrelated ConfBridge activity on the
-// same Asterisk is ignored.
+// a conference the bridge does not own, so a call routed to the bridge by
+// mistake creates no portal room.
 func (s *Subsystem) portalIDFromConference(conference string) (string, bool) {
-	prefix := s.cfg.Asterisk.ConferencePrefix
+	prefix := s.cfg.ConferencePrefix
 	if prefix == "" || !strings.HasPrefix(conference, prefix) {
 		return "", false
 	}
@@ -160,55 +211,70 @@ func newCallID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// handleAMIEvent is called on the AMI reader goroutine for every event.
-func (s *Subsystem) handleAMIEvent(ctx context.Context, pkt *asteriskami.Packet) {
-	if !asteriskami.IsConfbridgeEvent(pkt) {
+// HandleInboundCall owns an inbound control leg for its whole life.
+//
+// The sequence is fixed by what Asterisk does with a parallel Dial(): reply
+// 180 so the branch stays alive, put the media in place, and answer only once
+// a Matrix user has actually joined. Dial() hangs up every other branch with
+// ANSWERED_ELSEWHERE the instant one answers, so answering speculatively would
+// take the call away from the other endpoints.
+func (s *Subsystem) HandleInboundCall(ctx context.Context, leg InboundLeg) {
+	if !s.cfg.Enabled {
+		_ = leg.Reject(503, "Service Unavailable")
 		return
 	}
-	conference := pkt.Get("Conference")
+	conference := leg.Conference()
 	portalID, ok := s.portalIDFromConference(conference)
 	if !ok {
+		s.log.Warn().
+			Str("conference", conference).
+			Str("from", leg.From()).
+			Msg("INVITE without a recognisable conference header, declining")
+		_ = leg.Reject(404, "Not Found")
 		return
 	}
-	// The AMI reader must not block, so everything below runs detached. ctx is
-	// the AMI session context, which is cancelled on shutdown.
-	go func() {
-		var err error
-		switch {
-		case strings.EqualFold(pkt.Event(), asteriskami.EventConfbridgeJoin):
-			err = s.onConfbridgeJoin(ctx, portalID, conference, pkt)
-		default:
-			err = s.onConfbridgeGone(ctx, conference)
-		}
-		if err != nil && ctx.Err() == nil {
-			s.log.Err(err).
-				Str("event", pkt.Event()).
-				Str("conference", conference).
-				Msg("Failed to handle ConfBridge event")
-		}
-	}()
+	log := s.log.With().Str("portal_id", portalID).Logger()
+
+	call, err := s.beginInboundCall(ctx, portalID, conference)
+	if err != nil {
+		log.Err(err).Msg("Failed to start inbound call")
+		_ = leg.Reject(500, "Server Internal Error")
+		return
+	}
+	log = log.With().Str("call_id", call.CallID).Logger()
+
+	if err := leg.Ringing(); err != nil {
+		log.Err(err).Msg("Failed to send 180 Ringing")
+		_ = s.endCall(ctx, call)
+		return
+	}
+	// The media is put in place while the phone is still ringing: the LiveKit
+	// participant has to be in the room with a matching identity before a
+	// Matrix client will render it, and doing it on answer would add that
+	// latency to the moment the call connects.
+	if err := s.bridgeMedia(ctx, call); err != nil {
+		log.Err(err).Msg("Failed to put the call into LiveKit")
+		_ = leg.Reject(503, "Service Unavailable")
+		_ = s.endCall(ctx, call)
+		return
+	}
+	s.waitForMatrix(ctx, call, leg, log)
 }
 
-// onConfbridgeJoin reacts to a SIP leg landing in one of the bridge's
-// conferences. For an inbound call this is the first the bridge hears of it.
-func (s *Subsystem) onConfbridgeJoin(ctx context.Context, portalID, conference string, pkt *asteriskami.Packet) error {
-	existing, err := s.db.Call.GetActiveByConference(ctx, conference)
-	if err != nil {
-		return fmt.Errorf("look up call: %w", err)
+// beginInboundCall creates the portal room, the call row and the ghost's RTC
+// membership, which is what makes Matrix ring.
+func (s *Subsystem) beginInboundCall(ctx context.Context, portalID, conference string) (*database.Call, error) {
+	if existing, err := s.db.Call.GetActiveByConference(ctx, conference); err != nil {
+		return nil, fmt.Errorf("look up call: %w", err)
+	} else if existing != nil {
+		return nil, fmt.Errorf("conference %s already has call %s in progress", conference, existing.CallID)
 	}
-	if existing != nil {
-		// The outbound case: the bridge placed this call and is only learning
-		// the channel name now.
-		existing.Channel = pkt.Get("Channel")
-		return s.db.Call.Update(ctx, existing)
-	}
-
 	portal, err := s.portalForNumber(ctx, portalID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if portal.MXID == "" {
-		return fmt.Errorf("portal %s has no Matrix room", portalID)
+		return nil, fmt.Errorf("portal %s has no Matrix room", portalID)
 	}
 	call := &database.Call{
 		CallID:     newCallID(),
@@ -216,71 +282,131 @@ func (s *Subsystem) onConfbridgeJoin(ctx context.Context, portalID, conference s
 		RoomID:     portal.MXID,
 		Direction:  database.DirectionInbound,
 		Conference: conference,
-		Channel:    pkt.Get("Channel"),
 		LKRoom:     LiveKitRoomName(portal.MXID.String(), SlotRoom),
 		State:      database.StateRinging,
 	}
 	if err := s.db.Call.Insert(ctx, call); err != nil {
-		return fmt.Errorf("insert call: %w", err)
+		return nil, fmt.Errorf("insert call: %w", err)
+	}
+	if err := s.publishGhostMembership(ctx, call); err != nil {
+		return nil, fmt.Errorf("publish ghost RTC membership: %w", err)
 	}
 	s.log.Info().
 		Str("call_id", call.CallID).
 		Str("portal_id", portalID).
-		Msg("Inbound call parked in ConfBridge, ringing Matrix")
-
-	if err := s.publishGhostMembership(ctx, call); err != nil {
-		return fmt.Errorf("publish ghost RTC membership: %w", err)
-	}
-	go s.expireRing(ctx, call.CallID)
-	return nil
+		Msg("Inbound call ringing Matrix")
+	return call, nil
 }
 
-// expireRing hangs up an inbound call nobody answered. Without it the caller
-// sits in a silent conference indefinitely, because Asterisk has answered the
-// channel in order to park it.
-func (s *Subsystem) expireRing(ctx context.Context, callID string) {
+// waitForMatrix holds the control leg open until a Matrix user joins the RTC
+// session, the caller gives up, or the ring times out.
+func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg InboundLeg, log zerolog.Logger) {
+	joined := s.answerChannel(call.CallID)
+	defer s.forgetAnswerChannel(call.CallID)
+
 	select {
-	case <-ctx.Done():
+	case <-joined:
+	case <-leg.Done():
+		log.Info().Msg("Caller hung up before Matrix answered")
+		_ = s.endCall(ctx, call)
 		return
 	case <-time.After(s.cfg.RingTimeout):
-	}
-	call, err := s.db.Call.GetByID(ctx, callID)
-	if err != nil || call == nil || call.State != database.StateRinging {
+		log.Info().Msg("Nobody answered in Matrix, declining the call")
+		_ = leg.Reject(480, "Temporarily Unavailable")
+		_ = s.endCall(ctx, call)
+		return
+	case <-ctx.Done():
+		_ = leg.Reject(503, "Service Unavailable")
 		return
 	}
-	s.log.Info().Str("call_id", callID).Msg("Nobody answered, hanging up")
-	if call.Channel != "" {
-		if err := s.ami.Hangup(ctx, call.Channel); err != nil {
-			s.log.Warn().Err(err).Str("channel", call.Channel).Msg("Failed to hang up")
-		}
+
+	if err := leg.Answer(); err != nil {
+		log.Err(err).Msg("Failed to answer the call")
+		_ = s.endCall(ctx, call)
+		return
 	}
-	if err := s.endCall(ctx, call); err != nil {
-		s.log.Warn().Err(err).Str("call_id", callID).Msg("Failed to end call")
+	call.State = database.StateBridged
+	if err := s.db.Call.Update(ctx, call); err != nil {
+		log.Err(err).Msg("Failed to record the answered call")
+	}
+	log.Info().Msg("Call answered; the dialplan now moves the caller into the conference")
+
+	// The dialplan's gosub hangs this leg up within a few hundred
+	// milliseconds. That is the expected end of the leg and says nothing about
+	// the call, which from here on is watched through LiveKit.
+	select {
+	case <-leg.Done():
+	case <-ctx.Done():
 	}
 }
 
-// onConfbridgeGone reacts to a leave or a conference ending.
-func (s *Subsystem) onConfbridgeGone(ctx context.Context, conference string) error {
-	call, err := s.db.Call.GetActiveByConference(ctx, conference)
-	if err != nil || call == nil {
-		return err
+// answerChannel returns the channel closed when a Matrix user joins this
+// call's RTC session.
+func (s *Subsystem) answerChannel(callID string) chan struct{} {
+	s.answeredMu.Lock()
+	defer s.answeredMu.Unlock()
+	ch, ok := s.answered[callID]
+	if !ok {
+		ch = make(chan struct{})
+		s.answered[callID] = ch
 	}
-	s.log.Info().Str("call_id", call.CallID).Msg("SIP leg left the conference, ending call")
-	return s.endCall(ctx, call)
+	return ch
+}
+
+func (s *Subsystem) forgetAnswerChannel(callID string) {
+	s.answeredMu.Lock()
+	defer s.answeredMu.Unlock()
+	delete(s.answered, callID)
+}
+
+// signalAnswer releases the goroutine holding an inbound leg. It is a no-op
+// for a call that has none, which is the outbound case.
+func (s *Subsystem) signalAnswer(callID string) {
+	s.answeredMu.Lock()
+	defer s.answeredMu.Unlock()
+	ch, ok := s.answered[callID]
+	if !ok {
+		return
+	}
+	select {
+	case <-ch:
+	default:
+		close(ch)
+	}
 }
 
 // endCall retracts the ghost membership and marks the call ended. It is
-// idempotent, because a hangup can be observed twice (leave, then end).
+// idempotent, because a hangup can be observed from more than one direction.
 func (s *Subsystem) endCall(ctx context.Context, call *database.Call) error {
 	if call.State == database.StateEnded {
 		return nil
 	}
-	s.stopRefresh(call.CallID)
+	s.forgetSeen(call.CallID)
+	s.signalAnswer(call.CallID)
+	if leg := s.takeLeg(call.CallID); leg != nil {
+		if err := leg.Hangup(ctx); err != nil {
+			s.log.Debug().Err(err).Str("call_id", call.CallID).Msg("Control leg was already gone")
+		}
+	}
 	call.State = database.StateEnded
 	if err := s.db.Call.Update(ctx, call); err != nil {
 		return err
 	}
 	return s.retractGhostMembership(ctx, call)
+}
+
+func (s *Subsystem) keepLeg(callID string, leg OutboundLeg) {
+	s.legsMu.Lock()
+	defer s.legsMu.Unlock()
+	s.legs[callID] = leg
+}
+
+func (s *Subsystem) takeLeg(callID string) OutboundLeg {
+	s.legsMu.Lock()
+	defer s.legsMu.Unlock()
+	leg := s.legs[callID]
+	delete(s.legs, callID)
+	return leg
 }
 
 // ghostFor returns the ghost representing a phone number.
@@ -302,86 +428,6 @@ func (s *Subsystem) portalForNumber(ctx context.Context, portalID string) (*brid
 		}
 	}
 	return portal, nil
-}
-
-// publishGhostMembership announces the caller as a participant of the room's
-// RTC session, which is what makes Element ring.
-func (s *Subsystem) publishGhostMembership(ctx context.Context, call *database.Call) error {
-	ghost, err := s.ghostFor(ctx, call.PortalID)
-	if err != nil {
-		return err
-	}
-	deviceID := "SIP" + strings.ToUpper(call.CallID[:8])
-	membershipID := call.CallID
-	call.LKIdentity = LiveKitIdentity(ghost.Intent.GetMXID().String(), deviceID, membershipID)
-	if err := s.db.Call.Update(ctx, call); err != nil {
-		return err
-	}
-	_, err = ghost.Intent.SendState(ctx, call.RoomID, CallMemberEventType,
-		rtcStateKey(ghost.Intent.GetMXID(), deviceID),
-		ghostMembership(deviceID, membershipID, s.cfg.MembershipExpiry), time.Time{})
-	if err != nil {
-		return err
-	}
-	s.startRefresh(ctx, call, deviceID, membershipID)
-	return nil
-}
-
-// retractGhostMembership publishes the empty content that ends a membership.
-// Matrix has no state deletion, so leaving is an empty state event.
-func (s *Subsystem) retractGhostMembership(ctx context.Context, call *database.Call) error {
-	ghost, err := s.ghostFor(ctx, call.PortalID)
-	if err != nil {
-		return err
-	}
-	deviceID := "SIP" + strings.ToUpper(call.CallID[:8])
-	_, err = ghost.Intent.SendState(ctx, call.RoomID, CallMemberEventType,
-		rtcStateKey(ghost.Intent.GetMXID(), deviceID), leaveMembership(), time.Time{})
-	return err
-}
-
-// startRefresh keeps the ghost membership from expiring mid-call.
-func (s *Subsystem) startRefresh(ctx context.Context, call *database.Call, deviceID, membershipID string) {
-	refreshCtx, cancel := context.WithCancel(ctx)
-	s.refreshersMu.Lock()
-	if old := s.refreshers[call.CallID]; old != nil {
-		old()
-	}
-	s.refreshers[call.CallID] = cancel
-	s.refreshersMu.Unlock()
-
-	roomID, portalID, callID := call.RoomID, call.PortalID, call.CallID
-	go func() {
-		t := time.NewTicker(s.cfg.MembershipExpiry / 2)
-		defer t.Stop()
-		for {
-			select {
-			case <-refreshCtx.Done():
-				return
-			case <-t.C:
-				ghost, err := s.ghostFor(refreshCtx, portalID)
-				if err != nil {
-					return
-				}
-				_, err = ghost.Intent.SendState(refreshCtx, roomID, CallMemberEventType,
-					rtcStateKey(ghost.Intent.GetMXID(), deviceID),
-					ghostMembership(deviceID, membershipID, s.cfg.MembershipExpiry), time.Time{})
-				if err != nil {
-					s.log.Warn().Err(err).Str("call_id", callID).
-						Msg("Failed to refresh ghost RTC membership")
-				}
-			}
-		}
-	}()
-}
-
-func (s *Subsystem) stopRefresh(callID string) {
-	s.refreshersMu.Lock()
-	defer s.refreshersMu.Unlock()
-	if cancel := s.refreshers[callID]; cancel != nil {
-		cancel()
-		delete(s.refreshers, callID)
-	}
 }
 
 // handleCallMember reacts to a Matrix user joining or leaving the RTC session
@@ -427,8 +473,7 @@ func (s *Subsystem) handleCallMember(ctx context.Context, evt *event.Event) {
 	}
 }
 
-// onMatrixJoinedCall is the moment the bridge has been waiting for on an
-// inbound call, and the trigger for an outbound one.
+// onMatrixJoinedCall answers a ringing inbound call, or places an outbound one.
 //
 // The outbound half exists because Element X's native call button only writes
 // this state event: there is no Matrix event that says "dial the phone", so a
@@ -449,46 +494,52 @@ func (s *Subsystem) onMatrixJoinedCall(ctx context.Context, portal *bridgev2.Por
 		return nil
 	}
 	_ = content
-	return s.bridgeMedia(ctx, call)
+	s.signalAnswer(call.CallID)
+	return nil
 }
 
-// onMatrixLeftCall hangs up when the last Matrix participant leaves.
+// onMatrixLeftCall hangs up when the Matrix participant leaves.
 //
-// Only the ringing and bridged states are acted on: a leave event for a call
-// that already ended is normal, because clients retract their membership after
-// the far end hangs up.
+// Only a call still in progress is acted on: a leave event for a call that
+// already ended is normal, because clients retract their membership after the
+// far end hangs up.
 func (s *Subsystem) onMatrixLeftCall(ctx context.Context, portal *bridgev2.Portal, log zerolog.Logger) {
 	call, err := s.db.Call.GetActiveByPortal(ctx, string(portal.ID))
 	if err != nil || call == nil {
 		return
 	}
 	log.Info().Str("call_id", call.CallID).Msg("Matrix side left the call, hanging up")
-	if call.Channel != "" {
-		if err := s.ami.Hangup(ctx, call.Channel); err != nil {
-			log.Warn().Err(err).Msg("Failed to hang up SIP leg")
-		}
-	}
+	// The bridge has no channel of its own to hang up any more. Removing the
+	// LiveKit participant drops livekit-sip's leg out of the conference, which
+	// ends the call only if the conference is configured to end when that leg
+	// leaves. See the dialplan contract in the README.
+	s.removeParticipant(ctx, call, log)
 	if err := s.endCall(ctx, call); err != nil {
 		log.Warn().Err(err).Msg("Failed to end call")
 	}
 }
 
-// bridgeMedia asks livekit-sip to dial the ConfBridge holding the SIP leg and
+func (s *Subsystem) removeParticipant(ctx context.Context, call *database.Call, log zerolog.Logger) {
+	if call.LKIdentity == "" || call.LKRoom == "" {
+		return
+	}
+	if err := s.lk.RemoveParticipant(ctx, call.LKRoom, call.LKIdentity); err != nil {
+		log.Warn().Err(err).Msg("Failed to remove the SIP participant from LiveKit")
+	}
+}
+
+// bridgeMedia asks livekit-sip to dial the conference holding the call and
 // join the LiveKit room backing the portal room's Element Call.
 func (s *Subsystem) bridgeMedia(ctx context.Context, call *database.Call) error {
 	trunkID, err := s.currentTrunkID()
 	if err != nil {
 		return err
 	}
-	ghost, err := s.ghostFor(ctx, call.PortalID)
-	if err != nil {
-		return err
-	}
-	// livekit-sip dials the conference as if it were a phone number; the
-	// dialplan is expected to route the conference name straight into
-	// ConfBridge.
 	participant, err := s.lk.CreateSIPParticipant(ctx, &CreateSIPParticipantRequest{
-		SipTrunkID:          trunkID,
+		SipTrunkID: trunkID,
+		// livekit-sip dials the conference as if it were a phone number; the
+		// SIP server is expected to route the conference name into the
+		// conference itself.
 		SipCallTo:           call.Conference,
 		RoomName:            call.LKRoom,
 		ParticipantIdentity: call.LKIdentity,
@@ -499,12 +550,10 @@ func (s *Subsystem) bridgeMedia(ctx context.Context, call *database.Call) error 
 		return fmt.Errorf("create SIP participant: %w", err)
 	}
 	call.LKParticipant = participant.ParticipantID
-	call.State = database.StateBridged
 	s.log.Info().
 		Str("call_id", call.CallID).
 		Str("lk_room", call.LKRoom).
 		Str("lk_participant", participant.ParticipantID).
-		Stringer("ghost", ghost.Intent.GetMXID()).
 		Msg("Media bridged into LiveKit")
 	return s.db.Call.Update(ctx, call)
 }
@@ -523,8 +572,11 @@ func (s *Subsystem) Dial(ctx context.Context, portal *bridgev2.Portal) (*databas
 	} else if existing != nil {
 		return existing, nil
 	}
-	if s.cfg.Asterisk.OutboundChannel == "" {
-		return nil, fmt.Errorf("asterisk outbound_channel is not configured")
+	if s.cfg.OutboundURI == "" {
+		return nil, fmt.Errorf("calls.outbound_uri is not configured")
+	}
+	if s.sip == nil {
+		return nil, fmt.Errorf("the SIP transport is not running")
 	}
 
 	conference := s.conferenceFor(portalID)
@@ -540,35 +592,33 @@ func (s *Subsystem) Dial(ctx context.Context, portal *bridgev2.Portal) (*databas
 	if err := s.db.Call.Insert(ctx, call); err != nil {
 		return nil, fmt.Errorf("insert call: %w", err)
 	}
-
-	channel := strings.ReplaceAll(s.cfg.Asterisk.OutboundChannel, "{number}", phonenum.FromID(portalID))
-	err := s.ami.Originate(ctx, asteriskami.OriginateRequest{
-		Channel:  channel,
-		Context:  s.cfg.Asterisk.Context,
-		Exten:    s.cfg.Asterisk.Extension,
-		CallerID: s.cfg.Asterisk.CallerID,
-		Timeout:  s.cfg.Asterisk.OriginateTimeout,
-		Variables: map[string]string{
-			"CONFBRIDGE_NAME": conference,
-			"SIP_BRIDGE_CALL": call.CallID,
-		},
-	})
-	if err != nil {
-		call.State = database.StateEnded
-		_ = s.db.Call.Update(ctx, call)
-		return nil, fmt.Errorf("originate: %w", err)
-	}
-
-	// The ghost membership is published straight away rather than on answer, so
-	// that the Matrix side has something to join while the phone rings.
+	// The ghost membership goes out before the phone rings, so the Matrix side
+	// has something to join while it does.
 	if err := s.publishGhostMembership(ctx, call); err != nil {
 		s.log.Warn().Err(err).Str("call_id", call.CallID).
 			Msg("Failed to publish ghost RTC membership for outbound call")
 	}
+
+	uri := strings.ReplaceAll(s.cfg.OutboundURI, "{number}", phonenum.FromID(portalID))
+	leg, err := s.sip.Invite(ctx, uri, conference)
+	if err != nil {
+		_ = s.endCall(ctx, call)
+		return nil, fmt.Errorf("invite %s: %w", uri, err)
+	}
+	s.keepLeg(call.CallID, leg)
+
+	if err := s.bridgeMedia(ctx, call); err != nil {
+		_ = s.endCall(ctx, call)
+		return nil, err
+	}
+	call.State = database.StateBridged
+	if err := s.db.Call.Update(ctx, call); err != nil {
+		s.log.Warn().Err(err).Str("call_id", call.CallID).Msg("Failed to record the outbound call")
+	}
 	s.log.Info().
 		Str("call_id", call.CallID).
 		Str("portal_id", portalID).
-		Msg("Outbound call originated")
+		Msg("Outbound call placed")
 	return call, nil
 }
 
@@ -583,6 +633,82 @@ func (s *Subsystem) DialNumber(ctx context.Context, number string) (*database.Ca
 		return nil, err
 	}
 	return s.Dial(ctx, portal)
+}
+
+// runParticipantWatcher is how the bridge learns that a call has ended.
+//
+// There is no other signal. The bridge's own SIP leg is hung up a moment into
+// the call by design, and it has no channel on the SIP server to watch. The
+// one thing that lasts as long as the call is livekit-sip's participant in the
+// LiveKit room, so its disappearance is what ends the call here. A missed
+// departure leaves a ghost RTC membership pinned in the portal room until its
+// expiry lapses, which is the failure mode this loop exists to prevent.
+func (s *Subsystem) runParticipantWatcher(ctx context.Context) {
+	t := time.NewTicker(s.cfg.ParticipantPollInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.checkParticipants(ctx)
+		}
+	}
+}
+
+func (s *Subsystem) checkParticipants(ctx context.Context) {
+	active, err := s.db.Call.GetAllActive(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.log.Warn().Err(err).Msg("Failed to list active calls")
+		}
+		return
+	}
+	for _, call := range active {
+		if call.State != database.StateBridged || call.LKIdentity == "" {
+			continue
+		}
+		present, err := s.lk.ParticipantPresent(ctx, call.LKRoom, call.LKIdentity)
+		if err != nil {
+			if ctx.Err() == nil {
+				s.log.Warn().Err(err).Str("call_id", call.CallID).
+					Msg("Failed to check the LiveKit participant")
+			}
+			continue
+		}
+		if present {
+			s.markSeen(call.CallID)
+			continue
+		}
+		// Absent before it was ever present means LiveKit has not caught up
+		// yet, not that the call ended.
+		if !s.wasSeen(call.CallID) {
+			continue
+		}
+		s.log.Info().Str("call_id", call.CallID).
+			Msg("SIP participant left the LiveKit room, ending call")
+		if err := s.endCall(ctx, call); err != nil {
+			s.log.Warn().Err(err).Str("call_id", call.CallID).Msg("Failed to end call")
+		}
+	}
+}
+
+func (s *Subsystem) markSeen(callID string) {
+	s.seenMu.Lock()
+	defer s.seenMu.Unlock()
+	s.seen[callID] = true
+}
+
+func (s *Subsystem) wasSeen(callID string) bool {
+	s.seenMu.Lock()
+	defer s.seenMu.Unlock()
+	return s.seen[callID]
+}
+
+func (s *Subsystem) forgetSeen(callID string) {
+	s.seenMu.Lock()
+	defer s.seenMu.Unlock()
+	delete(s.seen, callID)
 }
 
 // RoomOf is a convenience for logging and tests.

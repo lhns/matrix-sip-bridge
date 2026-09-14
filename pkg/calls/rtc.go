@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/id"
 )
 
 // CallMemberEventType is the MSC3401 / MatrixRTC membership state event.
@@ -127,38 +126,4 @@ func (c *CallMemberContent) FirstMembershipID() string {
 		}
 	}
 	return ""
-}
-
-// ghostMembership builds the state event content the bridge publishes on behalf
-// of a phone-number ghost, so that Matrix clients render the caller as a
-// participant of the RTC session rather than an anonymous stream.
-func ghostMembership(deviceID, membershipID string, expiry time.Duration) *event.Content {
-	now := time.Now()
-	return &event.Content{Raw: map[string]any{
-		"application":  "m.call",
-		"call_id":      "",
-		"scope":        "m.room",
-		"device_id":    deviceID,
-		"membershipID": membershipID,
-		"created_ts":   now.UnixMilli(),
-		"expires":      now.Add(expiry).UnixMilli(),
-		"foci_preferred": []any{
-			map[string]any{"type": "livekit"},
-		},
-	}}
-}
-
-// leaveMembership is the empty content that ends a membership.
-func leaveMembership() *event.Content {
-	return &event.Content{Raw: map[string]any{}}
-}
-
-// rtcStateKey is the state key of a call.member event: "user_id_device_id" in
-// the current form, or the bare user ID in the legacy one. The bridge writes
-// the current form.
-func rtcStateKey(userID id.UserID, deviceID string) string {
-	if deviceID == "" {
-		return userID.String()
-	}
-	return userID.String() + "_" + deviceID
 }

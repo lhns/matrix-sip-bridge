@@ -117,6 +117,11 @@ const maxResponseBytes = 1 << 20
 
 // call performs one twirp JSON RPC against the livekit.SIP service.
 func (c *LiveKitClient) call(ctx context.Context, method string, g grants, req, resp any) error {
+	return c.callService(ctx, "livekit.SIP", method, g, req, resp)
+}
+
+// callService performs one twirp JSON RPC against any LiveKit service.
+func (c *LiveKitClient) callService(ctx context.Context, service, method string, g grants, req, resp any) error {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("marshal %s request: %w", method, err)
@@ -125,7 +130,7 @@ func (c *LiveKitClient) call(ctx context.Context, method string, g grants, req, 
 	if err != nil {
 		return fmt.Errorf("mint token: %w", err)
 	}
-	url := strings.TrimSuffix(c.cfg.URL, "/") + "/twirp/livekit.SIP/" + method
+	url := strings.TrimSuffix(c.cfg.URL, "/") + "/twirp/" + service + "/" + method
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -239,4 +244,54 @@ func (c *LiveKitClient) CreateSIPParticipant(ctx context.Context, req *CreateSIP
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// roomService is the twirp service that owns participants, as opposed to SIP
+// trunks and SIP participants.
+const roomService = "livekit.RoomService"
+
+type listParticipantsRequest struct {
+	Room string `json:"room"`
+}
+
+type listParticipantsResponse struct {
+	Participants []struct {
+		Identity string `json:"identity,omitempty"`
+		State    string `json:"state,omitempty"`
+	} `json:"participants"`
+}
+
+// ParticipantPresent reports whether an identity is still in a LiveKit room.
+//
+// This is the bridge's only liveness signal for a call in progress. Its own
+// SIP leg is gone seconds in by design, so the SIP participant leaving the
+// room is what "the call ended" means here.
+func (c *LiveKitClient) ParticipantPresent(ctx context.Context, room, identity string) (bool, error) {
+	var resp listParticipantsResponse
+	g := grants{Video: &videoGrant{RoomAdmin: true, Room: room}}
+	if err := c.callService(ctx, roomService, "ListParticipants", g, &listParticipantsRequest{Room: room}, &resp); err != nil {
+		return false, err
+	}
+	for _, p := range resp.Participants {
+		if p.Identity == identity {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+type removeParticipantRequest struct {
+	Room     string `json:"room"`
+	Identity string `json:"identity"`
+}
+
+// RemoveParticipant disconnects a participant.
+//
+// For the SIP participant this is the only way the bridge can hang up on the
+// phone: it drops livekit-sip's leg out of the conference. Whether that also
+// ends the far end's call is up to the conference configuration, not to this.
+func (c *LiveKitClient) RemoveParticipant(ctx context.Context, room, identity string) error {
+	g := grants{Video: &videoGrant{RoomAdmin: true, Room: room}}
+	return c.callService(ctx, roomService, "RemoveParticipant", g,
+		&removeParticipantRequest{Room: room, Identity: identity}, nil)
 }

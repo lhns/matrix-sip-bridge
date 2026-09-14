@@ -14,9 +14,9 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 
-	"github.com/lhns/matrix-sip-bridge/pkg/asteriskami"
 	"github.com/lhns/matrix-sip-bridge/pkg/calls"
 	sipdb "github.com/lhns/matrix-sip-bridge/pkg/database"
+	"github.com/lhns/matrix-sip-bridge/pkg/siptransport"
 )
 
 // SIPConnector is the bridgev2 network connector.
@@ -24,11 +24,11 @@ type SIPConnector struct {
 	Config Config
 
 	br    *bridgev2.Bridge
-	ami   *asteriskami.Client
+	sip   *siptransport.Transport
 	calls *calls.Subsystem
 	db    *sipdb.Database
 
-	// cancel stops the AMI and call subsystem loops.
+	// cancel stops the SIP endpoint and the call subsystem loops.
 	cancel context.CancelFunc
 }
 
@@ -38,23 +38,18 @@ var (
 )
 
 // Init is called before Start with the bridge fully constructed.
+//
+// The SIP endpoint is not built here: it validates its configuration and
+// resolves its media address, either of which can fail, and Init cannot report
+// an error.
 func (sc *SIPConnector) Init(bridge *bridgev2.Bridge) {
 	sc.br = bridge
 	sc.Config.applyDefaults()
 	sc.db = sipdb.New(bridge.DB.Database, bridge.Log.With().Str("db_section", "sip").Logger())
-	sc.ami = asteriskami.New(sc.Config.Asterisk, bridge.Log.With().Str("component", "asterisk ami").Logger())
-	sc.calls = calls.New(
-		sc.Config.Calls, bridge, sc.ami, sc.db,
-		bridge.Log.With().Str("component", "calls").Logger(),
-	)
 	bridge.Commands.(*commands.Processor).AddHandlers(sc.dialCommand())
 }
 
-// Start connects to Asterisk and starts the call subsystem.
-//
-// The two halves share one AMI connection: Asterisk multiplexes actions and
-// events over a single manager session, and a second login would double every
-// event the bridge sees.
+// Start brings up the SIP endpoint and the call subsystem.
 func (sc *SIPConnector) Start(ctx context.Context) error {
 	// The bridge's own context, not ctx: ctx is the startup context and is
 	// cancelled once Start returns.
@@ -63,20 +58,56 @@ func (sc *SIPConnector) Start(ctx context.Context) error {
 
 	sc.warnAboutRelay()
 
+	sip, err := siptransport.New(sc.Config.SIP, sc.br.Log.With().Str("component", "sip").Logger())
+	if err != nil {
+		cancel()
+		return err
+	}
+	sc.sip = sip
+	sc.calls = calls.New(
+		sc.Config.Calls, sc.br, sipTelephony{sip, sc.Config.SIP.ConferenceHeader}, sc.db,
+		sc.br.Log.With().Str("component", "calls").Logger(),
+	)
+
 	if err := sc.calls.Start(ctx, sc.eventRegistrar()); err != nil {
 		cancel()
 		return err
 	}
 
-	// Handlers must be registered before Run, because Run may deliver an event
-	// as soon as it connects.
+	// Handlers must be registered before the endpoint starts listening, or an
+	// INVITE that arrives immediately is answered 503.
 	if sc.Config.Messages.Enabled {
-		sc.ami.OnEvent(sc.handleAMIMessage)
+		sip.OnMessage(sc.handleInboundMessage)
 	}
-	go sc.ami.Run(runCtx)
-	go sc.ami.Heartbeat(runCtx, 0)
+	if sc.Config.Calls.Enabled {
+		sip.OnInvite(func(ctx context.Context, call *siptransport.InboundCall) {
+			sc.calls.HandleInboundCall(ctx, call)
+		})
+	}
+	go func() {
+		if err := sip.Run(runCtx); err != nil {
+			sc.br.Log.Err(err).Msg("The SIP endpoint stopped")
+		}
+	}()
 	go sc.calls.Run(runCtx)
 	return nil
+}
+
+// sipReady reports whether the SIP endpoint is usable, for the bridge state.
+func (sc *SIPConnector) sipReady() bool {
+	return sc.sip != nil && sc.sip.Ready()
+}
+
+// sipTelephony adapts the transport to the narrow interface the call subsystem
+// takes, and owns the one SIP detail that subsystem should not: the name of
+// the header carrying the conference.
+type sipTelephony struct {
+	transport        *siptransport.Transport
+	conferenceHeader string
+}
+
+func (s sipTelephony) Invite(ctx context.Context, to, conference string) (calls.OutboundLeg, error) {
+	return s.transport.Invite(ctx, to, map[string]string{s.conferenceHeader: conference})
 }
 
 // warnAboutRelay checks the two settings without which the bridge appears to
@@ -84,7 +115,7 @@ func (sc *SIPConnector) Start(ctx context.Context) error {
 // happens to own the login.
 //
 // There is no per-user SIP account to log into, so all Matrix users share the
-// single "asterisk" login and reach it through relay mode.
+// single "sip" login and reach it through relay mode.
 func (sc *SIPConnector) warnAboutRelay() {
 	relay := sc.br.Config.Relay
 	if !relay.Enabled {
@@ -163,19 +194,19 @@ func (sc *SIPConnector) LoadUserLogin(_ context.Context, login *bridgev2.UserLog
 // GetLoginFlows offers the single flow that just claims the shared login.
 func (sc *SIPConnector) GetLoginFlows() []bridgev2.LoginFlow {
 	return []bridgev2.LoginFlow{{
-		Name:        "Asterisk",
-		Description: "Use the bridge's shared Asterisk connection",
-		ID:          "asterisk",
+		Name:        "SIP",
+		Description: "Use the bridge's shared SIP endpoint",
+		ID:          LoginFlowID,
 	}}
 }
 
 // CreateLogin returns a login process that completes immediately.
 //
-// There is nothing to log in to: the AMI credentials are in the bridge config,
-// not per user. The login exists only because bridgev2 requires a UserLogin to
-// own portals and to be a relay target.
+// There is nothing to log in to: the SIP identity is in the bridge config, not
+// per user. The login exists only because bridgev2 requires a UserLogin to own
+// portals and to be a relay target.
 func (sc *SIPConnector) CreateLogin(_ context.Context, user *bridgev2.User, flowID string) (bridgev2.LoginProcess, error) {
-	if flowID != "asterisk" {
+	if flowID != LoginFlowID {
 		return nil, fmt.Errorf("unknown login flow ID %q", flowID)
 	}
 	return &SIPLogin{User: user}, nil
@@ -193,11 +224,11 @@ var _ bridgev2.LoginProcess = (*SIPLogin)(nil)
 func (sl *SIPLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
 	ul, err := sl.User.NewLogin(ctx, &database.UserLogin{
 		ID:         networkid.UserLoginID(LoginID),
-		RemoteName: "Asterisk",
+		RemoteName: "SIP",
 	}, &bridgev2.NewLoginParams{
 		// A second Matrix user logging in must adopt the existing login rather
 		// than create a duplicate, or bridgev2 would try to run two clients
-		// over one AMI session.
+		// over one SIP endpoint.
 		DeleteOnConflict: false,
 	})
 	if err != nil {
@@ -206,7 +237,7 @@ func (sl *SIPLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeComplete,
 		StepID:       "de.lhns.sip.complete",
-		Instructions: "Connected to the shared Asterisk trunk",
+		Instructions: "Connected to the shared SIP endpoint",
 		CompleteParams: &bridgev2.LoginCompleteParams{
 			UserLoginID: ul.ID,
 			UserLogin:   ul,

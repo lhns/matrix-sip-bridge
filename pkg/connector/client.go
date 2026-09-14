@@ -16,11 +16,11 @@ import (
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 
-	"github.com/lhns/matrix-sip-bridge/pkg/asteriskami"
 	"github.com/lhns/matrix-sip-bridge/pkg/phonenum"
+	"github.com/lhns/matrix-sip-bridge/pkg/siptransport"
 )
 
-// SIPClient is the NetworkAPI for the one shared Asterisk login.
+// SIPClient is the NetworkAPI for the one shared SIP login.
 type SIPClient struct {
 	UserLogin *bridgev2.UserLogin
 	conn      *SIPConnector
@@ -31,16 +31,16 @@ var (
 	_ bridgev2.IdentifierResolvingNetworkAPI = (*SIPClient)(nil)
 )
 
-// Connect reports the AMI state to Matrix. The connection itself is owned by
-// the connector, not by the login, because it is shared.
+// Connect reports the SIP endpoint's state to Matrix. The endpoint itself is
+// owned by the connector, not by the login, because it is shared.
 func (sc *SIPClient) Connect(_ context.Context) {
-	if sc.conn.ami.Connected() {
+	if sc.conn.sipReady() {
 		sc.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 		return
 	}
 	sc.UserLogin.BridgeState.Send(status.BridgeState{
 		StateEvent: status.StateConnecting,
-		Message:    "Connecting to Asterisk",
+		Message:    "Starting the SIP endpoint",
 	})
 }
 
@@ -133,10 +133,13 @@ func (sc *SIPClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	number := phonenum.FromID(string(msg.Portal.ID))
 	to := strings.ReplaceAll(cfg.OutboundTo, "{number}", number)
 
-	if err := sc.conn.ami.MessageSend(ctx, to, cfg.OutboundFrom, body); err != nil {
+	if sc.conn.sip == nil {
+		return nil, fmt.Errorf("the SIP endpoint is not running")
+	}
+	if err := sc.conn.sip.SendMessage(ctx, to, cfg.OutboundFrom, body); err != nil {
 		return nil, err
 	}
-	// AMI's MessageSend reply carries no message identifier, so the bridge
+	// A 200 to a SIP MESSAGE carries no message identifier, so the bridge
 	// mints one. It is only ever used for local deduplication: there is no
 	// delivery report to correlate it with.
 	return &bridgev2.MatrixMessageResponse{
@@ -154,21 +157,20 @@ type inboundMessage struct {
 	Body string
 }
 
-// parseInboundMessage reads the dialplan UserEvent that carries an inbound SIP
-// MESSAGE and normalises the sender.
+// parseInboundMessage normalises the addresses of an inbound message.
 //
 // It returns an error rather than guessing when From is not a usable number:
 // creating a portal keyed on a malformed identifier would strand the
 // conversation in a room that can never be replied to.
-func parseInboundMessage(pkt *asteriskami.Packet) (*inboundMessage, error) {
-	from, err := phonenum.Normalize(pkt.Get("From"))
+func parseInboundMessage(raw inboundMessage) (*inboundMessage, error) {
+	from, err := phonenum.Normalize(raw.From)
 	if err != nil {
-		return nil, fmt.Errorf("sender %q: %w", pkt.Get("From"), err)
+		return nil, fmt.Errorf("sender %q: %w", raw.From, err)
 	}
-	msg := &inboundMessage{From: from, Body: pkt.Get("Body")}
+	msg := &inboundMessage{From: from, Body: raw.Body}
 	// The recipient is informational; a trunk that presents it oddly must not
 	// stop the message being bridged.
-	if to, err := phonenum.Normalize(pkt.Get("To")); err == nil {
+	if to, err := phonenum.Normalize(raw.To); err == nil {
 		msg.To = to
 	}
 	if msg.Body == "" {
@@ -177,21 +179,23 @@ func parseInboundMessage(pkt *asteriskami.Packet) (*inboundMessage, error) {
 	return msg, nil
 }
 
-// handleAMIMessage turns a dialplan UserEvent into a Matrix message.
-func (sc *SIPConnector) handleAMIMessage(_ context.Context, pkt *asteriskami.Packet) {
-	if !strings.EqualFold(pkt.UserEventName(), sc.Config.Messages.UserEvent) {
-		return
-	}
+// handleInboundMessage turns an inbound SIP MESSAGE into a Matrix message.
+//
+// Returning an error makes the transport answer the MESSAGE with a failure
+// status, so the far end knows the text did not land.
+func (sc *SIPConnector) handleInboundMessage(_ context.Context, in siptransport.InboundMessage) error {
 	log := sc.br.Log.With().Str("component", "inbound sms").Logger()
-	msg, err := parseInboundMessage(pkt)
+	msg, err := parseInboundMessage(inboundMessage(in))
 	if err != nil {
 		log.Warn().Err(err).Msg("Ignoring unusable inbound message")
-		return
+		// The message is unusable, not undelivered; answering with a failure
+		// would only make the far end retry it.
+		return nil
 	}
 	login := sc.br.GetCachedUserLoginByID(networkid.UserLoginID(LoginID))
 	if login == nil {
 		log.Warn().Msg("Dropping inbound message: nobody has logged in yet")
-		return
+		return fmt.Errorf("no login yet")
 	}
 	portalID := phonenum.ToID(msg.From)
 	sc.br.QueueRemoteEvent(login, &simplevent.Message[*inboundMessage]{
@@ -211,6 +215,7 @@ func (sc *SIPConnector) handleAMIMessage(_ context.Context, pkt *asteriskami.Pac
 		ID:                 networkid.MessageID(fmt.Sprintf("in-%s-%d", portalID, time.Now().UnixNano())),
 		ConvertMessageFunc: convertInboundMessage,
 	})
+	return nil
 }
 
 func convertInboundMessage(_ context.Context, _ *bridgev2.Portal, _ bridgev2.MatrixAPI, data *inboundMessage) (*bridgev2.ConvertedMessage, error) {

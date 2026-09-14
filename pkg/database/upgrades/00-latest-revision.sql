@@ -6,7 +6,6 @@ CREATE TABLE sip_call (
     room_id        TEXT   NOT NULL,
     direction      TEXT   NOT NULL,
     conference     TEXT   NOT NULL,
-    channel        TEXT   NOT NULL,
     lk_room        TEXT   NOT NULL,
     lk_identity    TEXT   NOT NULL,
     lk_participant TEXT   NOT NULL,
@@ -21,6 +20,6 @@ CREATE TABLE sip_call (
 -- by portal. The index is not unique: ended calls are kept for a while.
 CREATE INDEX sip_call_portal_idx ON sip_call (portal_id, state);
 
--- ConfbridgeJoin/Leave name the conference, not the call, so events are
--- resolved back to a call through this index.
+-- An inbound INVITE names the conference, not the call, so it is resolved back
+-- to a call through this index.
 CREATE INDEX sip_call_conference_idx ON sip_call (conference);

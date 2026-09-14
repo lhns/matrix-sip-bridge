@@ -114,27 +114,48 @@ func TestExpired(t *testing.T) {
 	}
 }
 
+// The state key format is fiddly and getting it wrong means the event is
+// refused by the server or ignored by clients. Without MSC3757 a state key
+// starting with "@" must equal the sender, so the whole thing is pushed behind
+// an underscore.
 func TestRTCStateKey(t *testing.T) {
+	const user = "@sip_15551234567:example.com"
 	tests := []struct {
-		name   string
-		user   string
-		device string
-		want   string
+		name  string
+		owned bool
+		want  string
 	}{
-		{"with device", "@sip_15551234567:example.com", "SIPABCD", "@sip_15551234567:example.com_SIPABCD"},
-		{"without device", "@sip_15551234567:example.com", "", "@sip_15551234567:example.com"},
+		{"ordinary room version", false, "_@sip_15551234567:example.com_SIPABCD_m.call#ROOM"},
+		{"room version with owned state keys", true, "@sip_15551234567:example.com_SIPABCD_m.call#ROOM"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := rtcStateKey(idUser(tt.user), tt.device); got != tt.want {
+			if got := rtcStateKey(idUser(user), "SIPABCD", SlotRoom, tt.owned); got != tt.want {
 				t.Errorf("rtcStateKey = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
+func TestSupportsOwnedStateKeys(t *testing.T) {
+	tests := map[string]bool{
+		"10":                    false,
+		"11":                    false,
+		"12":                    false,
+		"org.matrix.msc3757.11": true,
+		"org.matrix.msc3779.12": true,
+		"org.example.custom":    false,
+	}
+	for version, want := range tests {
+		if got := supportsOwnedStateKeys(id.RoomVersion(version)); got != want {
+			t.Errorf("supportsOwnedStateKeys(%q) = %v, want %v", version, got, want)
+		}
+	}
+}
+
 func TestGhostMembershipIsRoomScoped(t *testing.T) {
-	content := ghostMembership("SIPABCD", "m1", time.Hour)
+	const user = "@sip_15551234567:example.com"
+	content := ghostMembership(idUser(user), "SIPABCD", "m1", time.Hour)
 	raw := content.Raw
 	if raw["application"] != "m.call" {
 		t.Errorf("application = %v, want m.call", raw["application"])
@@ -151,6 +172,35 @@ func TestGhostMembershipIsRoomScoped(t *testing.T) {
 	expires, ok := raw["expires"].(int64)
 	if !ok || expires <= time.Now().UnixMilli() {
 		t.Errorf("expires = %v, want a future timestamp", raw["expires"])
+	}
+	// checkRtcMembershipData refuses a membership whose member.user_id is not
+	// the sender, so the ghost must name itself here.
+	member, ok := raw["member"].(map[string]any)
+	if !ok {
+		t.Fatalf("member = %v, want an object", raw["member"])
+	}
+	if member["user_id"] != user {
+		t.Errorf("member.user_id = %v, want %q", member["user_id"], user)
+	}
+	if member["device_id"] != "SIPABCD" || member["id"] != "m1" {
+		t.Errorf("member identity = %v/%v, want SIPABCD/m1", member["device_id"], member["id"])
+	}
+}
+
+// The LiveKit identity must be the hash of exactly the triple written into the
+// membership, or Element Call filters the ghost's audio track out and the call
+// is silent as well as unattributed.
+func TestGhostMembershipMatchesLiveKitIdentity(t *testing.T) {
+	const user = "@sip_15551234567:example.com"
+	member := ghostMembership(idUser(user), "SIPABCD", "m1", time.Hour).Raw["member"].(map[string]any)
+	want := LiveKitIdentity(user, "SIPABCD", "m1")
+	got := LiveKitIdentity(
+		member["user_id"].(string),
+		member["device_id"].(string),
+		member["id"].(string),
+	)
+	if got != want {
+		t.Errorf("identity from the published membership = %q, want %q", got, want)
 	}
 }
 

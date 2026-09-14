@@ -15,7 +15,7 @@ func TestConferenceNameRoundTrip(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &Subsystem{}
-			s.cfg.Asterisk.ConferencePrefix = tt.prefix
+			s.cfg.ConferencePrefix = tt.prefix
 
 			if got := s.conferenceFor(tt.portalID); got != tt.conference {
 				t.Errorf("conferenceFor(%q) = %q, want %q", tt.portalID, got, tt.conference)
@@ -31,7 +31,7 @@ func TestConferenceNameRoundTrip(t *testing.T) {
 	}
 }
 
-// Asterisk may host conferences the bridge knows nothing about. Reacting to
+// The SIP server may route calls the bridge knows nothing about. Reacting to
 // those would create portal rooms for whatever their names happen to contain.
 func TestPortalIDFromConferenceRejectsForeignRooms(t *testing.T) {
 	tests := []struct {
@@ -48,7 +48,7 @@ func TestPortalIDFromConferenceRejectsForeignRooms(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &Subsystem{}
-			s.cfg.Asterisk.ConferencePrefix = tt.prefix
+			s.cfg.ConferencePrefix = tt.prefix
 			if got, ok := s.portalIDFromConference(tt.conference); ok {
 				t.Errorf("portalIDFromConference(%q) matched as %q, want no match", tt.conference, got)
 			}
@@ -60,7 +60,7 @@ func TestNewCallIDIsUniqueAndLongEnough(t *testing.T) {
 	seen := map[string]bool{}
 	for range 100 {
 		id := newCallID()
-		// publishGhostMembership slices the first 8 characters for the device
+		// deviceIDFor slices the first 8 characters for the device
 		// ID, so anything shorter would panic at runtime.
 		if len(id) != 32 {
 			t.Fatalf("call ID %q has length %d, want 32", id, len(id))

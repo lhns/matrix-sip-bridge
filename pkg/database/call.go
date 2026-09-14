@@ -12,8 +12,8 @@ import (
 type CallDirection string
 
 const (
-	// DirectionInbound is a call from the phone network, parked by Asterisk in
-	// a ConfBridge and waiting for the bridge to pull it into LiveKit.
+	// DirectionInbound is a call from the phone network, offered to the bridge
+	// as an INVITE naming the conference it will land in.
 	DirectionInbound CallDirection = "inbound"
 	// DirectionOutbound is a call the bridge asked Asterisk to place.
 	DirectionOutbound CallDirection = "outbound"
@@ -23,10 +23,11 @@ const (
 type CallState string
 
 const (
-	// StateRinging means the SIP leg exists but no Matrix user has joined the
-	// RTC session yet, so there is nothing to bridge the media to.
+	// StateRinging means the call exists but has not been answered in Matrix.
 	StateRinging CallState = "ringing"
-	// StateBridged means a LiveKit SIP participant has been created.
+	// StateBridged means the call is up: answered, with a LiveKit SIP
+	// participant carrying the audio. Only a bridged call is watched for the
+	// participant leaving.
 	StateBridged CallState = "bridged"
 	// StateEnded is terminal.
 	StateEnded CallState = "ended"
@@ -44,10 +45,9 @@ type Call struct {
 	RoomID   id.RoomID
 
 	Direction CallDirection
-	// Conference is the Asterisk ConfBridge name holding the SIP leg.
+	// Conference is the name of the conference holding the call. It is what
+	// the bridge passes to livekit-sip as sip_call_to.
 	Conference string
-	// Channel is the Asterisk channel of the SIP leg, needed to hang it up.
-	Channel string
 
 	// LKRoom is the LiveKit room name derived from RoomID; see
 	// calls.LiveKitRoomName.
@@ -74,17 +74,17 @@ func newCall(qh *dbutil.QueryHelper[*Call]) *Call {
 }
 
 const (
-	callColumns = `call_id, portal_id, room_id, direction, conference, channel,
+	callColumns = `call_id, portal_id, room_id, direction, conference,
 	               lk_room, lk_identity, lk_participant, state, created_at, updated_at`
 
 	insertCallQuery = `
 		INSERT INTO sip_call (` + callColumns + `)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`
 	updateCallQuery = `
 		UPDATE sip_call
-		SET conference = $2, channel = $3, lk_room = $4, lk_identity = $5,
-		    lk_participant = $6, state = $7, updated_at = $8
+		SET conference = $2, lk_room = $3, lk_identity = $4,
+		    lk_participant = $5, state = $6, updated_at = $7
 		WHERE call_id = $1
 	`
 	getCallByIDQuery = `SELECT ` + callColumns + ` FROM sip_call WHERE call_id = $1`
@@ -111,7 +111,7 @@ const (
 func (c *Call) Scan(row dbutil.Scannable) (*Call, error) {
 	var createdAt, updatedAt int64
 	err := row.Scan(
-		&c.CallID, &c.PortalID, &c.RoomID, &c.Direction, &c.Conference, &c.Channel,
+		&c.CallID, &c.PortalID, &c.RoomID, &c.Direction, &c.Conference,
 		&c.LKRoom, &c.LKIdentity, &c.LKParticipant, &c.State, &createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -124,7 +124,7 @@ func (c *Call) Scan(row dbutil.Scannable) (*Call, error) {
 
 func (c *Call) insertValues() []any {
 	return []any{
-		c.CallID, c.PortalID, c.RoomID, c.Direction, c.Conference, c.Channel,
+		c.CallID, c.PortalID, c.RoomID, c.Direction, c.Conference,
 		c.LKRoom, c.LKIdentity, c.LKParticipant, c.State,
 		c.CreatedAt.UnixMilli(), c.UpdatedAt.UnixMilli(),
 	}
@@ -144,7 +144,7 @@ func (cq *CallQuery) Insert(ctx context.Context, c *Call) error {
 func (cq *CallQuery) Update(ctx context.Context, c *Call) error {
 	c.UpdatedAt = time.Now()
 	return cq.Exec(ctx, updateCallQuery,
-		c.CallID, c.Conference, c.Channel, c.LKRoom, c.LKIdentity,
+		c.CallID, c.Conference, c.LKRoom, c.LKIdentity,
 		c.LKParticipant, c.State, c.UpdatedAt.UnixMilli())
 }
 
@@ -158,7 +158,7 @@ func (cq *CallQuery) GetActiveByPortal(ctx context.Context, portalID string) (*C
 	return cq.QueryOne(ctx, getActiveCallByPortalQuery, portalID)
 }
 
-// GetActiveByConference resolves a ConfBridge event back to a call, or nil.
+// GetActiveByConference resolves a conference name back to a call, or nil.
 func (cq *CallQuery) GetActiveByConference(ctx context.Context, conference string) (*Call, error) {
 	return cq.QueryOne(ctx, getActiveCallByConferenceQuery, conference)
 }
@@ -170,9 +170,9 @@ func (cq *CallQuery) GetAllActive(ctx context.Context) ([]*Call, error) {
 
 // EndAll marks every call ended.
 //
-// Call state lives in Asterisk and LiveKit, not here; this table is only a
-// cache of it. After a bridge restart the cache is stale and the channels it
-// names are gone, so startup clears it rather than trying to resume.
+// Call state lives in LiveKit and the SIP server, not here; this table is only
+// a cache of it. After a bridge restart the cache is stale and every leg it
+// names is gone, so startup clears it rather than trying to resume.
 func (cq *CallQuery) EndAll(ctx context.Context) error {
 	return cq.Exec(ctx, endAllCallsQuery, time.Now().UnixMilli())
 }
