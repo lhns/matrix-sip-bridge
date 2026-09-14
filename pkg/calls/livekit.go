@@ -203,6 +203,26 @@ func (c *LiveKitClient) CreateSIPOutboundTrunk(ctx context.Context, trunk *SIPOu
 	return &resp, nil
 }
 
+type updateSIPOutboundTrunkRequest struct {
+	SipTrunkID string `json:"sip_trunk_id"`
+	// Replace is the "replace" arm of the request's action oneof. LiveKit
+	// swaps the whole stored object for this one, keeping only the trunk ID,
+	// so every field must be sent; the "update" arm merges instead and cannot
+	// clear a field.
+	Replace *SIPOutboundTrunk `json:"replace"`
+}
+
+// UpdateSIPOutboundTrunk replaces an existing trunk in place, keeping its ID.
+func (c *LiveKitClient) UpdateSIPOutboundTrunk(ctx context.Context, id string, trunk *SIPOutboundTrunk) (*SIPOutboundTrunk, error) {
+	var resp SIPOutboundTrunk
+	err := c.call(ctx, "UpdateSIPOutboundTrunk", grants{SIP: &sipGrant{Admin: true}},
+		&updateSIPOutboundTrunkRequest{SipTrunkID: id, Replace: trunk}, &resp)
+	if err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // CreateSIPParticipantRequest asks livekit-sip to place a SIP call and put the
 // far end into a LiveKit room.
 type CreateSIPParticipantRequest struct {

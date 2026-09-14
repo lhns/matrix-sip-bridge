@@ -25,6 +25,9 @@ const testAPISecret = "secret-for-tests-only-0123456789"
 type fakeLiveKit struct {
 	*httptest.Server
 
+	// reply overrides the canned response body for a twirp method.
+	reply map[string]string
+
 	mu      sync.Mutex
 	methods []string
 	bodies  map[string]json.RawMessage
@@ -34,6 +37,7 @@ type fakeLiveKit struct {
 func newFakeLiveKit(t *testing.T) *fakeLiveKit {
 	t.Helper()
 	f := &fakeLiveKit{
+		reply:  map[string]string{},
 		bodies: map[string]json.RawMessage{},
 		claims: map[string]*tokenClaims{},
 	}
@@ -58,6 +62,10 @@ func newFakeLiveKit(t *testing.T) *fakeLiveKit {
 		f.mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
+		if body, ok := f.reply[method]; ok {
+			_, _ = w.Write([]byte(body))
+			return
+		}
 		switch method {
 		case "CreateRoom":
 			_, _ = w.Write([]byte(`{"sid":"RM_test","name":"room"}`))

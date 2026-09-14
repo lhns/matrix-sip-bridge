@@ -2,7 +2,11 @@ package calls
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -20,11 +24,47 @@ func (s *Subsystem) wantedTrunk() *SIPOutboundTrunk {
 	return t
 }
 
-// reconcileTrunk makes sure the outbound trunk exists and caches its ID.
+// trunkFingerprint identifies a wanted trunk spec without exposing it. It
+// covers the password, so it must never be logged or put in an error.
+func trunkFingerprint(t *SIPOutboundTrunk) string {
+	h := sha256.New()
+	for _, f := range append([]string{t.Name, t.Address, t.AuthUsername, t.AuthPassword}, t.Numbers...) {
+		_, _ = h.Write([]byte(f))
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// trunkDiff names the fields in which LiveKit's copy differs from the wanted
+// one. Names only: the values include a password.
+func trunkDiff(have, want *SIPOutboundTrunk) []string {
+	var diff []string
+	if have.Address != want.Address {
+		diff = append(diff, "address")
+	}
+	if !slices.Equal(have.Numbers, want.Numbers) {
+		diff = append(diff, "numbers")
+	}
+	if have.AuthUsername != want.AuthUsername {
+		diff = append(diff, "auth_username")
+	}
+	if have.AuthPassword != want.AuthPassword {
+		diff = append(diff, "auth_password")
+	}
+	return diff
+}
+
+// reconcileTrunk makes sure the outbound trunk exists, matches the config and
+// caches its ID.
 //
 // livekit-sip stores trunk objects in Redis with no persistence guarantee, so a
 // Redis restart drops them and every later CreateSIPParticipant fails. There is
 // no event for that, so the trunk is checked at startup and then on a timer.
+//
+// Matching on the name alone is not enough: a trunk created before the SIP
+// credentials were configured keeps failing every call with "sip server
+// required auth, but no username or password was provided" until the stored
+// object itself is corrected.
 func (s *Subsystem) reconcileTrunk(ctx context.Context) error {
 	if s.cfg.LiveKit.TrunkAddress == "" {
 		return fmt.Errorf("livekit trunk_address is not configured")
@@ -34,17 +74,47 @@ func (s *Subsystem) reconcileTrunk(ctx context.Context) error {
 		return fmt.Errorf("list outbound trunks: %w", err)
 	}
 	want := s.wantedTrunk()
+	fp := trunkFingerprint(want)
 	for _, t := range trunks {
-		if t.Name == want.Name {
-			s.trunkID.Store(&t.SipTrunkID)
+		if t.Name != want.Name {
+			continue
+		}
+		s.trunkID.Store(&t.SipTrunkID)
+		diff := trunkDiff(t, want)
+		if len(diff) == 0 {
+			s.trunkPushed.Store(&fp)
 			return nil
 		}
+		// A deployment that withholds auth_password from List reports a diff
+		// no write can ever close. Once this exact spec has been pushed to
+		// this trunk, a password-only diff against a blank is that, not drift.
+		if len(diff) == 1 && diff[0] == "auth_password" && t.AuthPassword == "" {
+			if pushed := s.trunkPushed.Load(); pushed != nil && *pushed == fp {
+				return nil
+			}
+		}
+		// UpdateSIPOutboundTrunk's replace action swaps the whole object and
+		// keeps the trunk ID, so a call already dialling through this trunk
+		// keeps a valid ID and picks the new settings up on its next INVITE.
+		updated, err := s.lk.UpdateSIPOutboundTrunk(ctx, t.SipTrunkID, want)
+		if err != nil {
+			return fmt.Errorf("update outbound trunk %q: %w", want.Name, err)
+		}
+		s.trunkID.Store(&updated.SipTrunkID)
+		s.trunkPushed.Store(&fp)
+		s.log.Info().
+			Str("trunk_id", updated.SipTrunkID).
+			Str("trunk_name", updated.Name).
+			Str("fields", strings.Join(diff, ",")).
+			Msg("Updated LiveKit outbound trunk to match the config")
+		return nil
 	}
 	created, err := s.lk.CreateSIPOutboundTrunk(ctx, want)
 	if err != nil {
 		return fmt.Errorf("create outbound trunk %q: %w", want.Name, err)
 	}
 	s.trunkID.Store(&created.SipTrunkID)
+	s.trunkPushed.Store(&fp)
 	s.log.Info().
 		Str("trunk_id", created.SipTrunkID).
 		Str("trunk_name", created.Name).

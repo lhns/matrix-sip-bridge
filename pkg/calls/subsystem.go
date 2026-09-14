@@ -101,6 +101,11 @@ type Subsystem struct {
 
 	trunkID atomic.Pointer[string]
 
+	// trunkPushed is the fingerprint of the trunk spec this process last wrote
+	// to LiveKit. It exists so that a deployment which does not return
+	// auth_password from List is not rewritten on every reconcile tick.
+	trunkPushed atomic.Pointer[string]
+
 	// answered carries the "a Matrix user joined" signal from the call.member
 	// handler to the goroutine holding an inbound leg open.
 	answeredMu sync.Mutex
