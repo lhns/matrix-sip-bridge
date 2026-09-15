@@ -316,6 +316,38 @@ Three things worth knowing before wiring up a Deployment:
 - Only strings, booleans and numbers are supported, and a duration field reaches
   Go as an integer of **nanoseconds**. Set durations in the config file.
 
+### Startup and readiness
+
+The bridge starts in a fixed order: the database, then the Matrix connector,
+then the SIP endpoint. Two things follow from that, and both are handled in
+the bridge rather than left to the deployment.
+
+The first real dial of the database is the schema upgrade, well after the pool
+is opened, and mautrix exits on the first failure with no retry. A pod that
+starts before its network policy is programmed therefore crash-loops once per
+deploy. `main.go` pings the database from `PostInit` first, retrying with an
+exponential backoff for up to a minute.
+
+Readiness must be probed at `GET /_health/ready` on the **appservice** port, not
+with a TCP check on that port:
+
+```yaml
+readinessProbe:
+    httpGet: {path: /_health/ready, port: appservice}
+```
+
+The appservice listener binds, and mautrix's own `/_matrix/mau/ready` turns
+200, up to 30s before the SIP port is bound — the homeserver ping in between
+retries six times with a 5s sleep. A probe that only checks the appservice port
+reports Ready while the SIP peer's INVITEs are still refused. `/_health/ready`
+answers 200 once the appservice *and* the SIP endpoint are up, and then keeps
+answering 200: it exists to close the startup window, and a SIP fault later on
+is reported as bridge state rather than by dropping the pod — which would take
+the Matrix side out of the Service with it.
+
+The endpoint is served on the appservice router, so it does not exist when the
+bridge is configured for appservice websocket transport or `no_server`.
+
 ### Image tags
 
 CI publishes to `ghcr.io/lhns/matrix-sip-bridge`. Every push to `main` produces
@@ -332,6 +364,7 @@ pkg/connector/             bridgev2 NetworkConnector and NetworkAPI (messaging)
   client.go                  inbound and outbound SIP MESSAGE
   commands.go                !dial, for numbers with no portal room yet
   config.go                  network config struct and upgrader
+  readiness.go               the /_health/ready endpoint the k8s probe uses
   example-config.yaml        shipped as the base for config upgrades
 pkg/siptransport/          the SIP user agent: sipgo, no media stack
   transport.go               listener, registration, request handlers

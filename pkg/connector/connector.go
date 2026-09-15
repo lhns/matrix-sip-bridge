@@ -47,6 +47,10 @@ func (sc *SIPConnector) Init(bridge *bridgev2.Bridge) {
 	sc.Config.applyDefaults()
 	sc.db = sipdb.New(bridge.DB.Database, bridge.Log.With().Str("db_section", "sip").Logger())
 	bridge.Commands.(*commands.Processor).AddHandlers(sc.dialCommand())
+	// Init is the last point before the appservice HTTP server starts serving.
+	if mx, ok := bridge.Matrix.(*matrix.Connector); ok {
+		sc.registerReadiness(mx.AS)
+	}
 }
 
 // Start brings up the SIP endpoint and the call subsystem.
