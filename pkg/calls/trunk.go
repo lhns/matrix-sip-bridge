@@ -123,11 +123,19 @@ func (s *Subsystem) reconcileTrunk(ctx context.Context) error {
 	return nil
 }
 
+// DefaultTrunkReconcileInterval is how often the trunk is re-checked when the
+// config does not say. It is a compromise: the trunk only disappears when
+// livekit-sip's Redis is restarted, and the first call after that fails
+// whatever this is, so a shorter interval buys a faster recovery and nothing
+// else. The connector applies it to the config; runTrunkReconciler repeats it
+// for a subsystem built without one.
+const DefaultTrunkReconcileInterval = 5 * time.Minute
+
 // runTrunkReconciler reconciles once immediately and then on a timer.
 func (s *Subsystem) runTrunkReconciler(ctx context.Context) {
 	interval := s.cfg.LiveKit.TrunkReconcileInterval
 	if interval <= 0 {
-		interval = 5 * time.Minute
+		interval = DefaultTrunkReconcileInterval
 	}
 	s.reconcileAndReport(ctx)
 	t := time.NewTicker(interval)

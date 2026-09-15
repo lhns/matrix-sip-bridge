@@ -48,6 +48,11 @@ type LiveKitConfig struct {
 	TrunkReconcileInterval time.Duration `yaml:"trunk_reconcile_interval"`
 }
 
+// defaultLiveKitTimeout bounds one twirp request. It has to cover
+// CreateSIPParticipant with wait_until_answered, which does not return until
+// the far end picks up, so it is a ring timeout rather than an RPC timeout.
+const defaultLiveKitTimeout = 30 * time.Second
+
 // LiveKitClient talks to the LiveKit SIP service over twirp.
 //
 // The JSON encoding of twirp is used rather than protobuf so that the bridge
@@ -61,7 +66,7 @@ type LiveKitClient struct {
 // NewLiveKitClient builds a client. It does not contact the server.
 func NewLiveKitClient(cfg LiveKitConfig) *LiveKitClient {
 	if cfg.Timeout <= 0 {
-		cfg.Timeout = 30 * time.Second
+		cfg.Timeout = defaultLiveKitTimeout
 	}
 	return &LiveKitClient{
 		cfg:  cfg,

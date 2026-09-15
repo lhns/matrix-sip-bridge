@@ -2,7 +2,6 @@ package connector
 
 import (
 	_ "embed"
-	"time"
 
 	"go.mau.fi/util/configupgrade"
 
@@ -121,6 +120,6 @@ func (c *Config) applyDefaults() {
 		c.Calls.LiveKit.TrunkName = "matrix-sip-bridge"
 	}
 	if c.Calls.LiveKit.TrunkReconcileInterval <= 0 {
-		c.Calls.LiveKit.TrunkReconcileInterval = 5 * time.Minute
+		c.Calls.LiveKit.TrunkReconcileInterval = calls.DefaultTrunkReconcileInterval
 	}
 }

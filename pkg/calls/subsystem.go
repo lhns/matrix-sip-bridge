@@ -262,6 +262,17 @@ func (s *Subsystem) portalIDFromConference(conference string) (string, bool) {
 	return rest, true
 }
 
+// detachedTimeout bounds the work a call does on a context detached from its
+// own. Recording an answer and tearing a call down both outlive the leg that
+// asked for them, so neither can run on the leg's context -- but neither may
+// hang forever either, or the goroutine holding the leg never returns.
+const detachedTimeout = 30 * time.Second
+
+// ringSetupGrace is how much longer than the ring timeout a row may claim to
+// be ringing before it is treated as the wreckage of an interrupted setup. It
+// covers the work between the row being written and the leg actually ringing.
+const ringSetupGrace = time.Minute
+
 func newCallID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
@@ -426,6 +437,8 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, callID, portalID, conf
 // waitForMatrix holds the control leg open until a Matrix user joins the RTC
 // session, the caller gives up, or the ring times out.
 func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg InboundLeg, log zerolog.Logger, w callWaiters) {
+	ring := time.NewTimer(s.cfg.RingTimeout)
+	defer ring.Stop()
 	select {
 	case <-w.joined:
 	case <-w.ended:
@@ -445,7 +458,7 @@ func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg 
 		log.Info().Msg("Caller hung up before Matrix answered")
 		_ = s.endCall(ctx, call)
 		return
-	case <-time.After(s.cfg.RingTimeout):
+	case <-ring.C:
 		log.Info().Msg("Nobody answered in Matrix, declining the call")
 		_ = leg.Reject(480, "Temporarily Unavailable")
 		_ = s.endCall(ctx, call)
@@ -467,7 +480,7 @@ func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg 
 	// The write is detached from ctx: a call's context dies with its SIP leg,
 	// and teardown cancels it, so recording the outcome on it is how an
 	// answered call ended up logged as "context canceled".
-	recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), detachedTimeout)
 	mine, err := s.db.Call.Transition(recordCtx, call, database.StateRinging, database.StateBridged)
 	cancelRecord()
 	if err != nil {
@@ -562,9 +575,7 @@ func (s *Subsystem) endIfStale(ctx context.Context, call *database.Call) (bool, 
 func (s *Subsystem) callIsStale(call *database.Call, now time.Time) bool {
 	switch call.State {
 	case database.StateRinging:
-		// The grace is for the setup work between the row being written and
-		// the leg actually ringing.
-		return now.Sub(call.CreatedAt) > s.cfg.RingTimeout+time.Minute
+		return now.Sub(call.CreatedAt) > s.cfg.RingTimeout+ringSetupGrace
 	case database.StateBridged:
 		return now.Sub(call.UpdatedAt) > s.cfg.MembershipExpiry
 	default:
@@ -761,7 +772,7 @@ func (s *Subsystem) failCall(ctx context.Context, call *database.Call, reason st
 }
 
 func (s *Subsystem) endCallAs(ctx context.Context, call *database.Call, end callEnd) error {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), detachedTimeout)
 	defer cancel()
 	// The row as it was before it ended: End overwrites UpdatedAt and State,
 	// which are what say whether the call was answered and for how long.

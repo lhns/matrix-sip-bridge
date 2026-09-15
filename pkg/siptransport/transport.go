@@ -263,6 +263,12 @@ func resolveHost(host string) (string, error) {
 	return "", fmt.Errorf("no addresses for %q", host)
 }
 
+// defaultRegisterRefresh is the refresh interval for a registration whose
+// expiry is too small to halve. Config.ApplyDefaults gives Expiry five
+// minutes, so this is a floor against a nonsensical config rather than a
+// default anyone meets: without it such a config REGISTERs in a tight loop.
+const defaultRegisterRefresh = 150 * time.Second
+
 // registerLoop keeps the bridge registered with the SIP server.
 func (t *Transport) registerLoop(ctx context.Context) {
 	if !t.cfg.Register.Enabled {
@@ -270,8 +276,13 @@ func (t *Transport) registerLoop(ctx context.Context) {
 	}
 	refresh := t.cfg.Register.Expiry / 2
 	if refresh <= 0 {
-		refresh = 150 * time.Second
+		refresh = defaultRegisterRefresh
 	}
+	// One timer, reset each pass rather than a fresh time.After in the select:
+	// a time.After timer is not stopped when the other arm wins, so a shutdown
+	// left one live for the rest of the refresh interval.
+	timer := time.NewTimer(refresh)
+	defer timer.Stop()
 	for {
 		if err := t.register(ctx, t.cfg.Register.Expiry); err != nil {
 			t.registered.Store(false)
@@ -282,6 +293,7 @@ func (t *Transport) registerLoop(ctx context.Context) {
 		} else {
 			t.registered.Store(true)
 		}
+		timer.Reset(refresh)
 		select {
 		case <-ctx.Done():
 			// Best-effort de-registration; the server expires it anyway.
@@ -289,7 +301,7 @@ func (t *Transport) registerLoop(ctx context.Context) {
 			_ = t.register(deregCtx, 0)
 			cancel()
 			return
-		case <-time.After(refresh):
+		case <-timer.C:
 		}
 	}
 }
