@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
 	"go.mau.fi/util/ptr"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/event"
@@ -391,5 +393,96 @@ func TestTakeNotificationsIsExhaustive(t *testing.T) {
 	// A decline naming a retracted notification must no longer match.
 	if callID, ok := s.signalDecline("$one"); ok || callID != "" {
 		t.Errorf("signalDecline after retraction = %q, %v; want no match", callID, ok)
+	}
+}
+
+// fakeInboundLeg is the control leg of an inbound call, recording what the
+// subsystem did to it. Answer closes Done, as the real one effectively does:
+// the dialplan hangs the leg up the moment it is answered.
+type fakeInboundLeg struct {
+	mu        sync.Mutex
+	answered  int
+	rejects   []int
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func newFakeInboundLeg() *fakeInboundLeg {
+	return &fakeInboundLeg{done: make(chan struct{})}
+}
+
+func (l *fakeInboundLeg) From() string          { return "sip:caller@example.com" }
+func (l *fakeInboundLeg) Conference() string    { return "sip-15551234567" }
+func (l *fakeInboundLeg) Done() <-chan struct{} { return l.done }
+func (l *fakeInboundLeg) Ringing() error        { return nil }
+func (l *fakeInboundLeg) finish()               { l.closeOnce.Do(func() { close(l.done) }) }
+
+func (l *fakeInboundLeg) Answer() error {
+	l.mu.Lock()
+	l.answered++
+	l.mu.Unlock()
+	l.finish()
+	return nil
+}
+
+func (l *fakeInboundLeg) Reject(code int, _ string) error {
+	l.mu.Lock()
+	l.rejects = append(l.rejects, code)
+	l.mu.Unlock()
+	l.finish()
+	return nil
+}
+
+func (l *fakeInboundLeg) state() (int, []int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.answered, append([]int(nil), l.rejects...)
+}
+
+// Nothing repeats a call.member join, and signalAnswer drops a signal for a
+// call with no channel waiting for it. A user who answered while the ring
+// notification was still going out, or while the media was being bridged, was
+// therefore never heard: the call rang on and was declined at the timeout.
+func TestAnswerArrivingBeforeTheWaitIsNotLost(t *testing.T) {
+	s := &Subsystem{
+		db:       testDatabase(t),
+		log:      zerolog.Nop(),
+		answered: map[string]chan struct{}{},
+		declined: map[string]chan struct{}{},
+		ended:    map[string]chan struct{}{},
+	}
+	s.cfg.RingTimeout = 5 * time.Second
+
+	callID := newCallID()
+	waiters := s.waitersFor(callID)
+	defer s.forgetWaiters(callID)
+
+	call := &database.Call{
+		CallID:     callID,
+		PortalID:   "15551234567",
+		RoomID:     "!portal:example.com",
+		Direction:  database.DirectionInbound,
+		Conference: "sip-15551234567",
+		State:      database.StateRinging,
+	}
+	if err := s.db.Call.Insert(t.Context(), call); err != nil {
+		t.Fatalf("insert call: %v", err)
+	}
+
+	// The answer lands while the call is still being set up.
+	s.signalAnswer(callID)
+
+	leg := newFakeInboundLeg()
+	s.waitForMatrix(t.Context(), call, leg, zerolog.Nop(), waiters)
+
+	answered, rejects := leg.state()
+	if answered != 1 {
+		t.Errorf("the leg was answered %d times, want once", answered)
+	}
+	if len(rejects) != 0 {
+		t.Errorf("the leg was rejected with %v, want no rejection", rejects)
+	}
+	if call.State != database.StateBridged {
+		t.Errorf("call state = %q, want %q", call.State, database.StateBridged)
 	}
 }

@@ -294,7 +294,16 @@ func (s *Subsystem) HandleInboundCall(ctx context.Context, leg InboundLeg) {
 		return
 	}
 
-	call, err := s.beginInboundCall(ctx, portalID, conference)
+	// The channels a ringing call is released by are created before it is
+	// announced to Matrix. signalAnswer drops a signal for a call that has
+	// none, and nothing repeats a call.member join: a user who answered while
+	// the ring notification was still being sent, or while the media was being
+	// bridged, was never heard and the call rang on until it timed out.
+	callID := newCallID()
+	waiters := s.waitersFor(callID)
+	defer s.forgetWaiters(callID)
+
+	call, err := s.beginInboundCall(ctx, callID, portalID, conference)
 	if err != nil {
 		log.Err(err).Msg("Failed to start inbound call")
 		_ = leg.Reject(500, "Server Internal Error")
@@ -312,12 +321,34 @@ func (s *Subsystem) HandleInboundCall(ctx context.Context, leg InboundLeg) {
 		_ = s.endCall(ctx, call)
 		return
 	}
-	s.waitForMatrix(ctx, call, leg, log)
+	s.waitForMatrix(ctx, call, leg, log, waiters)
+}
+
+// callWaiters are the channels that release the goroutine holding an inbound
+// leg open.
+type callWaiters struct {
+	joined   <-chan struct{}
+	declined <-chan struct{}
+	ended    <-chan struct{}
+}
+
+func (s *Subsystem) waitersFor(callID string) callWaiters {
+	return callWaiters{
+		joined:   s.answerChannel(callID),
+		declined: s.declineChannel(callID),
+		ended:    s.endedChannel(callID),
+	}
+}
+
+func (s *Subsystem) forgetWaiters(callID string) {
+	s.forgetAnswerChannel(callID)
+	s.forgetDeclineChannel(callID)
+	s.forgetEndedChannel(callID)
 }
 
 // beginInboundCall creates the portal room, the call row and the ghost's RTC
 // membership, which is what makes Matrix ring.
-func (s *Subsystem) beginInboundCall(ctx context.Context, portalID, conference string) (call *database.Call, retErr error) {
+func (s *Subsystem) beginInboundCall(ctx context.Context, callID, portalID, conference string) (call *database.Call, retErr error) {
 	if existing, err := s.activeCallByConference(ctx, conference); err != nil {
 		return nil, fmt.Errorf("look up call: %w", err)
 	} else if existing != nil {
@@ -334,7 +365,6 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, portalID, conference s
 	if err != nil {
 		return nil, err
 	}
-	callID := newCallID()
 	call = &database.Call{
 		CallID:     callID,
 		PortalID:   portalID,
@@ -385,23 +415,16 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, portalID, conference s
 
 // waitForMatrix holds the control leg open until a Matrix user joins the RTC
 // session, the caller gives up, or the ring times out.
-func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg InboundLeg, log zerolog.Logger) {
-	joined := s.answerChannel(call.CallID)
-	defer s.forgetAnswerChannel(call.CallID)
-	declined := s.declineChannel(call.CallID)
-	defer s.forgetDeclineChannel(call.CallID)
-	ended := s.endedChannel(call.CallID)
-	defer s.forgetEndedChannel(call.CallID)
-
+func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg InboundLeg, log zerolog.Logger, w callWaiters) {
 	select {
-	case <-joined:
-	case <-ended:
+	case <-w.joined:
+	case <-w.ended:
 		// Teardown is not an answer. Answering here is what used to log
 		// "left the call" and "call answered" for the same call in the same
 		// breath, and rewrote the ended row back to bridged.
 		log.Info().Msg("Call ended before Matrix answered")
 		return
-	case <-declined:
+	case <-w.declined:
 		log.Info().Msg("Matrix declined the call")
 		// 486 rather than 480: the difference is what the caller's network
 		// plays them, and a rejection is not an absence.
