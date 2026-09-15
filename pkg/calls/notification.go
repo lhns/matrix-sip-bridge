@@ -43,10 +43,11 @@ const NotificationRing = "ring"
 
 // ringNotification builds the content of the event that makes a client ring.
 //
-// lifetime is what ends the ring: there is no retraction event and no
-// redaction in the bridgev2 Matrix API, so a notification that outlives the
-// bridge's own ring timeout would leave a phantom incoming call on every
-// device. It must therefore be the ring timeout, not a round number.
+// lifetime is the backstop that ends the ring: MSC4075 has no cancellation
+// event, so a call that ends early is retracted by redacting this one, and a
+// notification that outlived the bridge's own ring timeout would leave a
+// phantom incoming call on every device that missed the redaction. It must
+// therefore be the ring timeout, not a round number.
 //
 // The mentions are not cosmetic either. No homeserver ships a push rule for
 // this event type, so the only thing that turns it into a push — and a ring on

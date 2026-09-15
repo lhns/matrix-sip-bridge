@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"go.mau.fi/util/ptr"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/database"
 )
@@ -360,4 +362,34 @@ func TestInviteContextStopReleasesTheCall(t *testing.T) {
 	// A call that ends after the INVITE is done must not panic on a closed
 	// channel or find anything left to signal.
 	s.signalEnded("call-1")
+}
+
+// The ring notification is retracted by redacting it, so the event IDs have to
+// come back exactly once: twice would redact an event that is already gone,
+// and leaving them behind would let a decline arriving after the call ended
+// match a call that no longer exists.
+func TestTakeNotificationsIsExhaustive(t *testing.T) {
+	s := &Subsystem{notifies: map[id.EventID]string{
+		"$one":   "call-1",
+		"$two":   "call-1",
+		"$other": "call-2",
+	}}
+
+	taken := s.takeNotifications("call-1")
+	slices.Sort(taken)
+	want := []id.EventID{"$one", "$two"}
+	if !slices.Equal(taken, want) {
+		t.Errorf("takeNotifications = %v, want %v", taken, want)
+	}
+	if got := s.takeNotifications("call-1"); len(got) != 0 {
+		t.Errorf("takeNotifications again = %v, want nothing left", got)
+	}
+	// Another call's notification is not collateral.
+	if got := s.takeNotifications("call-2"); len(got) != 1 || got[0] != "$other" {
+		t.Errorf("takeNotifications(call-2) = %v, want the one it sent", got)
+	}
+	// A decline naming a retracted notification must no longer match.
+	if callID, ok := s.signalDecline("$one"); ok || callID != "" {
+		t.Errorf("signalDecline after retraction = %q, %v; want no match", callID, ok)
+	}
 }

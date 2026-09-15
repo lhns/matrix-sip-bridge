@@ -533,7 +533,7 @@ func (s *Subsystem) answerChannel(callID string) chan struct{} {
 }
 
 // declineChannel returns the channel closed when a Matrix user rejects this
-// call, and rememberNotification/forgetNotification maintain the map from the
+// call, and rememberNotification/takeNotifications maintain the map from the
 // ring notification to the call it announced.
 func (s *Subsystem) declineChannel(callID string) chan struct{} {
 	s.declinedMu.Lock()
@@ -624,14 +624,20 @@ func (s *Subsystem) rememberNotification(notify id.EventID, callID string) {
 	s.notifies[notify] = callID
 }
 
-func (s *Subsystem) forgetNotification(callID string) {
+// takeNotifications removes and returns the ring notifications a call sent, so
+// the same call cannot be retracted twice and a late decline naming one of
+// them no longer matches.
+func (s *Subsystem) takeNotifications(callID string) []id.EventID {
 	s.declinedMu.Lock()
 	defer s.declinedMu.Unlock()
+	var taken []id.EventID
 	for notify, owner := range s.notifies {
 		if owner == callID {
+			taken = append(taken, notify)
 			delete(s.notifies, notify)
 		}
 	}
+	return taken
 }
 
 // signalDecline releases the goroutine holding the inbound leg of the call the
@@ -700,8 +706,9 @@ func (s *Subsystem) endCall(ctx context.Context, call *database.Call) error {
 		return nil
 	}
 	s.forgetSeen(call.CallID)
-	s.forgetNotification(call.CallID)
 	s.signalEnded(call.CallID)
+	// Before anything slower: this is what stops the phones ringing.
+	s.retractRingNotification(ctx, call)
 	// livekit-sip holds the SIP leg into the conference for as long as its
 	// participant exists, and nothing else removes it. Skipping this on the
 	// decline and timeout paths left the conference up indefinitely, which

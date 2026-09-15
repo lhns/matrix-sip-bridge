@@ -82,8 +82,8 @@ func (s *Subsystem) publishGhostMembership(ctx context.Context, ghost *bridgev2.
 // sees a notification whose sender is not the RTC member it relates to has no
 // caller to display, and the decline it sends back would not refer to anyone.
 //
-// Nothing retracts this event. Its lifetime is the ring timeout, so the ring
-// stops on its own at exactly the moment the bridge gives up on the call.
+// Its lifetime bounds the ring; retractRingNotification ends it sooner when
+// the call does.
 func (s *Subsystem) publishRingNotification(ctx context.Context, ghost *bridgev2.Ghost, call *database.Call, membership id.EventID) (id.EventID, error) {
 	content := ringNotification(time.Now(), s.cfg.RingTimeout, membership, s.humanMembers(ctx, call.RoomID))
 	resp, err := ghost.Intent.SendMessage(ctx, call.RoomID, RtcNotificationEventType, content, nil)
@@ -118,6 +118,35 @@ func (s *Subsystem) humanMembers(ctx context.Context, roomID id.RoomID) []id.Use
 	}
 	slices.Sort(users)
 	return users
+}
+
+// retractRingNotification redacts the events that made clients ring.
+//
+// MSC4075 has no cancellation event, so redaction is the retraction: without
+// it a caller who gives up after eight seconds, or a call that fails on a
+// missing trunk, leaves every device in the room ringing for the rest of the
+// notification's lifetime.
+//
+// The redaction is sent by the ghost that sent the notification, which is what
+// makes it allowed without giving the ghost a power level.
+func (s *Subsystem) retractRingNotification(ctx context.Context, call *database.Call) {
+	notifies := s.takeNotifications(call.CallID)
+	if len(notifies) == 0 {
+		return
+	}
+	ghost, err := s.ghostFor(ctx, call.PortalID)
+	if err != nil {
+		s.log.Warn().Err(err).Str("call_id", call.CallID).
+			Msg("Could not retract the ring notification; clients will ring until it lapses")
+		return
+	}
+	for _, notify := range notifies {
+		content := &event.Content{Parsed: &event.RedactionEventContent{Redacts: notify}}
+		if _, err := ghost.Intent.SendMessage(ctx, call.RoomID, event.EventRedaction, content, nil); err != nil {
+			s.log.Warn().Err(err).Str("call_id", call.CallID).Stringer("notification", notify).
+				Msg("Could not retract the ring notification; clients will ring until it lapses")
+		}
+	}
 }
 
 // retractGhostMembership publishes the empty content that ends a membership.
