@@ -339,6 +339,7 @@ func TestTakeNotificationsIsExhaustive(t *testing.T) {
 // subsystem did to it. Answer closes Done, as the real one effectively does:
 // the dialplan hangs the leg up the moment it is answered.
 type fakeInboundLeg struct {
+	rec       *recorder
 	mu        sync.Mutex
 	answered  int
 	rejects   []int
@@ -353,10 +354,11 @@ func newFakeInboundLeg() *fakeInboundLeg {
 func (l *fakeInboundLeg) From() string          { return "sip:caller@example.com" }
 func (l *fakeInboundLeg) Conference() string    { return "sip-15551234567" }
 func (l *fakeInboundLeg) Done() <-chan struct{} { return l.done }
-func (l *fakeInboundLeg) Ringing() error        { return nil }
+func (l *fakeInboundLeg) Ringing() error        { l.rec.add("180"); return nil }
 func (l *fakeInboundLeg) finish()               { l.closeOnce.Do(func() { close(l.done) }) }
 
 func (l *fakeInboundLeg) Answer() error {
+	l.rec.add("200")
 	l.mu.Lock()
 	l.answered++
 	l.mu.Unlock()
@@ -365,6 +367,7 @@ func (l *fakeInboundLeg) Answer() error {
 }
 
 func (l *fakeInboundLeg) Reject(code int, _ string) error {
+	l.rec.add("reject")
 	l.mu.Lock()
 	l.rejects = append(l.rejects, code)
 	l.mu.Unlock()

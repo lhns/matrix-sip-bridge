@@ -191,12 +191,20 @@ func TestBridgeMediaCreatesTheRoomBeforeTheParticipant(t *testing.T) {
 }
 
 func testDatabase(t *testing.T) *database.Database {
+	return testDatabaseLogged(t, dbutil.NoopLogger)
+}
+
+// testDatabaseLogged is testDatabase with a query logger. The logger goes on
+// the parent: a dbutil child copies the parent's LoggingDB, which keeps
+// pointing at the parent, so setting Log on the child is not observed.
+func testDatabaseLogged(t *testing.T, log dbutil.DatabaseLogger) *database.Database {
 	t.Helper()
 	raw, err := dbutil.NewWithDialect("file:"+filepath.ToSlash(filepath.Join(t.TempDir(), "test.db")), "sqlite3")
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
 	t.Cleanup(func() { _ = raw.Close() })
+	raw.Log = log
 	db := database.New(raw, zerolog.Nop())
 	if err := db.Upgrade(context.Background()); err != nil {
 		t.Fatalf("upgrade: %v", err)
