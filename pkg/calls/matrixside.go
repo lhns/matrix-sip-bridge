@@ -35,6 +35,11 @@ type GhostIntent interface {
 // bridgev2.MatrixAPIWithArbitraryRoomState. Asserting to bridgev2's own
 // interface would demand the whole of MatrixAPI from a test double, and the
 // only method either caller here uses is this one.
+//
+// bridgev2's own ghost intent implements it, so an intent that does not is a
+// test double. Both callers -- ownedStateKeys and warnIfEncrypted -- then take
+// the conservative answer rather than failing: the prefixed state key every
+// room version accepts, and no encryption warning.
 type roomStateReader interface {
 	GetStateEvent(ctx context.Context, roomID id.RoomID, eventType event.Type, stateKey string) (*event.Event, error)
 }

@@ -225,6 +225,8 @@ func (s *Subsystem) ownedStateKeys(ctx context.Context, intent GhostIntent, room
 		return cached.(bool)
 	}
 	owned := false
+	// An intent that cannot read room state is a test double; see
+	// roomStateReader. The prefixed key is what that conservative answer is.
 	if reader, ok := intent.(roomStateReader); ok {
 		evt, err := reader.GetStateEvent(ctx, roomID, event.StateCreate, "")
 		if err != nil {
@@ -328,6 +330,8 @@ func (s *Subsystem) warnIfEncrypted(ctx context.Context, intent GhostIntent, roo
 	}
 	reader, ok := intent.(roomStateReader)
 	if !ok {
+		// A test double; see roomStateReader. Nothing is cached, so a real
+		// intent for the same room still gets its answer.
 		return
 	}
 	evt, err := reader.GetStateEvent(ctx, roomID, event.StateEncryption, "")

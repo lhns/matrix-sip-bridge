@@ -58,8 +58,16 @@ type Call struct {
 	// SIP participant has been created.
 	LKParticipant string
 
-	State     CallState
+	State CallState
+	// CreatedAt is when the row was written, which for both directions is
+	// within a few hundred milliseconds of the phone starting to ring.
 	CreatedAt time.Time
+	// UpdatedAt is the last write to the row, and there is no column that
+	// means "answered at". For a bridged call the last write before the
+	// timeline record is read is the ringing -> bridged transition, so it is
+	// the answer to within one Update, and that is what the call duration is
+	// measured from. For a ringing call it means nothing in particular, which
+	// is why staleness measures that one from CreatedAt instead.
 	UpdatedAt time.Time
 }
 

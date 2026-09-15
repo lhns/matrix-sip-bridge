@@ -49,6 +49,9 @@ func callRecordBody(call *database.Call, end callEnd, now time.Time) string {
 	if end.Failure != "" {
 		return "Call failed — " + end.Failure
 	}
+	// UpdatedAt is the ringing -> bridged transition for an answered call,
+	// which is the nearest thing the row has to an answer time; see
+	// database.Call.UpdatedAt.
 	answered := call.State == database.StateBridged
 	switch {
 	case answered && call.Direction == database.DirectionOutbound:

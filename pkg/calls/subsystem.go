@@ -152,14 +152,18 @@ type Subsystem struct {
 	roomVersions   sync.Map // id.RoomID -> bool
 	encryptedRooms sync.Map // id.RoomID -> bool
 
-	// onTrunkState is told the outcome of every trunk reconcile. It is set
-	// once, before Run starts the reconciler, because the bridge state it
-	// feeds lives in the connector and this package cannot reach it.
-	onTrunkState func(error)
+	// onTrunkState is told the outcome of every trunk reconcile. The bridge
+	// state it feeds lives in the connector, which this package cannot reach.
+	//
+	// Atomic, not a plain field: it is written by whoever builds the subsystem
+	// and read by the reconciler goroutine, and while the one caller does set
+	// it before Run, nothing in the type says so.
+	onTrunkState atomic.Pointer[func(error)]
 }
 
-// OnTrunkState registers the callback. It must be called before Run.
-func (s *Subsystem) OnTrunkState(fn func(error)) { s.onTrunkState = fn }
+// OnTrunkState registers the callback that is told the outcome of every trunk
+// reconcile.
+func (s *Subsystem) OnTrunkState(fn func(error)) { s.onTrunkState.Store(&fn) }
 
 // New builds the subsystem. Start does the work.
 func New(cfg Config, br *bridgev2.Bridge, loginID networkid.UserLoginID, sip Telephony, db *database.Database, log zerolog.Logger) *Subsystem {
@@ -572,6 +576,9 @@ func (s *Subsystem) endIfStale(ctx context.Context, call *database.Call) (bool, 
 // interrupted setup. A bridged call has no such bound -- a real call can last
 // as long as the two ends keep talking -- so it is only given up on at the
 // membership expiry, which is when clients stop believing in it anyway.
+//
+// The two are measured from different columns, deliberately: see Call.CreatedAt
+// and Call.UpdatedAt for which timestamp means what in which state.
 func (s *Subsystem) callIsStale(call *database.Call, now time.Time) bool {
 	switch call.State {
 	case database.StateRinging:

@@ -163,8 +163,8 @@ func (s *Subsystem) reconcileAndReport(ctx context.Context) {
 	if err != nil {
 		s.log.Warn().Err(err).Msg("Failed to reconcile LiveKit outbound trunk")
 	}
-	if s.onTrunkState != nil {
-		s.onTrunkState(err)
+	if fn := s.onTrunkState.Load(); fn != nil {
+		(*fn)(err)
 	}
 }
 

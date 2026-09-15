@@ -49,6 +49,7 @@ func (sc *SIPConnector) Init(bridge *bridgev2.Bridge) {
 	sc.br = bridge
 	sc.Config.applyDefaults()
 	sc.health = newCallHealth(sc.Config.Calls.Notices)
+	// The logger labels this schema's upgrade, not its queries; see sipdb.New.
 	sc.db = sipdb.New(bridge.DB.Database, bridge.Log.With().Str("db_section", "sip").Logger())
 	bridge.Commands.(*commands.Processor).AddHandlers(sc.dialCommand())
 	// Init is the last point before the appservice HTTP server starts serving.
@@ -131,7 +132,9 @@ func (sc *SIPConnector) watchSIPHealth(ctx context.Context) {
 //
 // The login is looked up each time rather than held: the SIP endpoint and the
 // trunk are reconciled before anyone has logged in, and there is nobody to
-// tell until they have. Connect sends the state unconditionally when they do.
+// tell until they have. A state dropped for that reason is still recorded as
+// the last one sent, so it is never re-sent as a change -- which is safe only
+// because Connect sends the state unconditionally the moment a login appears.
 func (sc *SIPConnector) report(state status.BridgeState, changed bool) {
 	if !changed {
 		return

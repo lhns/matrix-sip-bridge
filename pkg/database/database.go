@@ -24,6 +24,11 @@ type Database struct {
 }
 
 // New wraps a bridgev2 database in a child that owns the sip_* tables.
+//
+// log reaches the schema upgrade only. Query logging cannot be redirected
+// here: dbutil.Database.Child copies the parent's LoggingDB by value, and its
+// internal pointer still names the parent, so every query this schema runs is
+// logged with the parent's logger whatever is passed in.
 func New(db *dbutil.Database, log zerolog.Logger) *Database {
 	child := db.Child(versionTable, upgradeTable, dbutil.ZeroLogger(log))
 	return &Database{
