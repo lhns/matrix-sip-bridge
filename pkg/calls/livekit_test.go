@@ -131,9 +131,10 @@ func TestEnsureRoomCreatesTheRoom(t *testing.T) {
 func TestBridgeMediaCreatesTheRoomBeforeTheParticipant(t *testing.T) {
 	f := newFakeLiveKit(t)
 	s := &Subsystem{
-		lk:  f.client(),
-		db:  testDatabase(t),
-		log: zerolog.Nop(),
+		lk:   f.client(),
+		db:   testDatabase(t),
+		log:  zerolog.Nop(),
+		seen: map[string]bool{},
 	}
 	trunk := "ST_test"
 	s.trunkID.Store(&trunk)
@@ -174,6 +175,12 @@ func TestBridgeMediaCreatesTheRoomBeforeTheParticipant(t *testing.T) {
 	}
 	if call.LKParticipant != "PA_test" {
 		t.Errorf("LKParticipant = %q, want it recorded", call.LKParticipant)
+	}
+	// A call shorter than the poll interval was never observed in the room, so
+	// the watcher would not end it and the number stayed out of service until
+	// the membership expiry. livekit-sip answering is the observation.
+	if !s.wasSeen(call.CallID) {
+		t.Error("the call was not marked seen once its SIP participant existed")
 	}
 }
 

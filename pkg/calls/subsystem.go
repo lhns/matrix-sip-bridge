@@ -138,6 +138,9 @@ type Subsystem struct {
 	// seen records that a call's LiveKit participant has been observed at
 	// least once, so that "not in the room" means "left" rather than "not
 	// joined yet". Teardown depends on the difference.
+	//
+	// It is not persisted: a restart ends every row it could describe, so the
+	// map and the table cannot disagree about a call that survived one.
 	seenMu sync.Mutex
 	seen   map[string]bool
 
@@ -981,6 +984,12 @@ func (s *Subsystem) bridgeMedia(ctx context.Context, call *database.Call) error 
 		return fmt.Errorf("create SIP participant: %w", err)
 	}
 	call.LKParticipant = participant.ParticipantID
+	// The participant counts as seen from here: livekit-sip has answered and
+	// joined the room, so its later absence means the call ended. Waiting for
+	// a poll tick to observe it meant a call shorter than the poll interval
+	// was never seen at all, the watcher never ended the row, and every later
+	// call to that number was refused until the membership expiry.
+	s.markSeen(call.CallID)
 	s.log.Info().
 		Str("call_id", call.CallID).
 		Str("lk_room", call.LKRoom).
