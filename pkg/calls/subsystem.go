@@ -418,7 +418,12 @@ func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg 
 		_ = s.endCall(ctx, call)
 		return
 	case <-ctx.Done():
+		log.Info().Msg("The bridge is going away while the call rings, declining")
 		_ = leg.Reject(503, "Service Unavailable")
+		// endCall detaches the context it is given, so the teardown still
+		// runs. Returning without it left the row ringing and the ghost's
+		// membership pinned in the room.
+		_ = s.endCall(ctx, call)
 		return
 	}
 
