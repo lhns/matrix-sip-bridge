@@ -1061,9 +1061,13 @@ func (s *Subsystem) dial(ctx context.Context, portal *bridgev2.Portal) (*databas
 	// No ring notification for an outbound call: the Matrix side started it
 	// and is already in the session, so notifying it would ring the caller's
 	// own phone.
+	//
+	// Without it there is nothing for the Matrix side to join, so the callee
+	// would be answered into a conference with nobody in it and stay there
+	// until they hung up themselves.
 	if _, err := s.publishGhostMembership(ctx, ghost, call); err != nil {
-		s.log.Warn().Err(err).Str("call_id", call.CallID).
-			Msg("Failed to publish ghost RTC membership for outbound call")
+		_ = s.endCall(ctx, call)
+		return nil, fmt.Errorf("publish ghost RTC membership: %w", err)
 	}
 
 	uri := strings.ReplaceAll(s.cfg.OutboundURI, "{number}", phonenum.FromID(portalID))
