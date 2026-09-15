@@ -257,3 +257,22 @@ func TestParticipantPresentOnARoomThatIsGone(t *testing.T) {
 		})
 	}
 }
+
+// A call that ends before its media was bridged still asks LiveKit to remove
+// the participant, because the identity is reserved when the row is created.
+// LiveKit has nothing to remove then, which is the state being asked for.
+func TestRemoveParticipantThatIsAlreadyGone(t *testing.T) {
+	f := newFakeLiveKit(t)
+	f.status["RemoveParticipant"] = http.StatusNotFound
+	f.reply["RemoveParticipant"] = `{"code":"not_found","msg":"participant does not exist"}`
+
+	if err := f.client().RemoveParticipant(t.Context(), "qKKEsmRoomName", "identity"); err != nil {
+		t.Errorf("RemoveParticipant: %v", err)
+	}
+
+	f.status["RemoveParticipant"] = http.StatusInternalServerError
+	f.reply["RemoveParticipant"] = `{"code":"internal","msg":"redis is down"}`
+	if err := f.client().RemoveParticipant(t.Context(), "qKKEsmRoomName", "identity"); err == nil {
+		t.Error("a real failure was reported as success")
+	}
+}

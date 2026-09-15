@@ -365,8 +365,16 @@ type removeParticipantRequest struct {
 // For the SIP participant this is the only way the bridge can hang up on the
 // phone: it drops livekit-sip's leg out of the conference. Whether that also
 // ends the far end's call is up to the conference configuration, not to this.
+//
+// A participant or room LiveKit does not have is the state this asks for, not
+// a failure: every call whose identity was reserved before the media was
+// bridged ends through here, including the ones that never got that far.
 func (c *LiveKitClient) RemoveParticipant(ctx context.Context, room, identity string) error {
 	g := grants{Video: &videoGrant{RoomAdmin: true, Room: room}}
-	return c.callService(ctx, roomService, "RemoveParticipant", g,
+	err := c.callService(ctx, roomService, "RemoveParticipant", g,
 		&removeParticipantRequest{Room: room, Identity: identity}, nil)
+	if isNotFound(err) {
+		return nil
+	}
+	return err
 }
