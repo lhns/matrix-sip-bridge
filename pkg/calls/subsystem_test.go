@@ -381,10 +381,8 @@ func (l *fakeInboundLeg) state() (int, []int) {
 	return l.answered, append([]int(nil), l.rejects...)
 }
 
-// Nothing repeats a call.member join, and signalAnswer drops a signal for a
-// call with no channel waiting for it. A user who answered while the ring
-// notification was still going out, or while the media was being bridged, was
-// therefore never heard: the call rang on and was declined at the timeout.
+// waitForMatrix must see an answer that arrived before it started waiting.
+// HandleInboundCall says why a lost one cannot be recovered.
 func TestAnswerArrivingBeforeTheWaitIsNotLost(t *testing.T) {
 	s := &Subsystem{
 		db:       testDatabase(t),

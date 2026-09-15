@@ -152,11 +152,10 @@ func TestMatrixCallButtonLooksUpTheCallOnce(t *testing.T) {
 	}
 }
 
-// Nothing repeats a call.member join, and signalAnswer drops a signal for a
-// call with no channel waiting for it. A user who answered while the ring
-// notification was still going out was therefore never heard, and the call
-// rang on until the timeout — which is why the waiters are registered before
-// the call is announced.
+// The same race as TestAnswerArrivingBeforeTheWaitIsNotLost, but through the
+// whole of HandleInboundCall: the join lands while the ring notification is
+// still going out. It is why the waiters are registered before the call is
+// announced to Matrix at all.
 func TestAnsweringTheInstantTheNotificationArrives(t *testing.T) {
 	h := newHarness(t)
 	// The join lands while HandleInboundCall is still inside setup.
