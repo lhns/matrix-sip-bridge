@@ -272,6 +272,20 @@ func (s *Subsystem) HandleInboundCall(ctx context.Context, leg InboundLeg) {
 	}
 	log := s.log.With().Str("portal_id", portalID).Logger()
 
+	// The 180 goes out before the setup below, not after it: until a
+	// provisional response arrives the caller hears nothing, and building the
+	// portal for a number that has never called before takes seconds. A final
+	// response after a 180 is still valid, so every path below can still
+	// reject.
+	if err := leg.Ringing(); err != nil {
+		log.Err(err).Msg("Failed to send 180 Ringing")
+		// A branch of a parallel Dial() that never gets a final response is
+		// held until the transaction times out, so every failure here ends
+		// with a definitive status rather than a dangling leg.
+		_ = leg.Reject(500, "Server Internal Error")
+		return
+	}
+
 	call, err := s.beginInboundCall(ctx, portalID, conference)
 	if err != nil {
 		log.Err(err).Msg("Failed to start inbound call")
@@ -280,15 +294,6 @@ func (s *Subsystem) HandleInboundCall(ctx context.Context, leg InboundLeg) {
 	}
 	log = log.With().Str("call_id", call.CallID).Logger()
 
-	if err := leg.Ringing(); err != nil {
-		log.Err(err).Msg("Failed to send 180 Ringing")
-		// A branch of a parallel Dial() that never gets a final response is
-		// held until the transaction times out, so every failure here ends
-		// with a definitive status rather than a dangling leg.
-		_ = leg.Reject(500, "Server Internal Error")
-		_ = s.endCall(ctx, call)
-		return
-	}
 	// The media is put in place while the phone is still ringing: the LiveKit
 	// participant has to be in the room with a matching identity before a
 	// Matrix client will render it, and doing it on answer would add that
