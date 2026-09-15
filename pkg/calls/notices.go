@@ -11,9 +11,18 @@ type NoticeConfig struct {
 	CallEnded *bool `yaml:"call_ended"`
 	// CallFailed folds a call the bridge could not carry into that record.
 	CallFailed *bool `yaml:"call_failed"`
+	// SIPDown reports a SIP endpoint that is not usable as bridge state.
+	SIPDown *bool `yaml:"sip_down"`
+	// TrunkMissing reports an unusable LiveKit trunk as bridge state.
+	TrunkMissing *bool `yaml:"trunk_missing"`
 }
 
 func (n NoticeConfig) callEnded() bool  { return onUnlessSet(n.CallEnded) }
 func (n NoticeConfig) callFailed() bool { return onUnlessSet(n.CallFailed) }
+
+// SIPDownEnabled and TrunkMissingEnabled are read by the connector, which owns
+// the bridge state this package has no access to.
+func (n NoticeConfig) SIPDownEnabled() bool      { return onUnlessSet(n.SIPDown) }
+func (n NoticeConfig) TrunkMissingEnabled() bool { return onUnlessSet(n.TrunkMissing) }
 
 func onUnlessSet(v *bool) bool { return v == nil || *v }

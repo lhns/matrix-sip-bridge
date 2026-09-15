@@ -87,6 +87,14 @@ calls:
         # "Call failed - no route". Without it a failed call is a phone that
         # rang and then went silent with no explanation anywhere the user looks.
         call_failed: true
+        # A SIP endpoint that is not listening or has lost its registration,
+        # and a LiveKit outbound trunk that cannot be reconciled, as bridge
+        # state. Both are transient states, so with bridge_status_notices set
+        # to errors a blip is silent and only an outage that lasts three
+        # minutes reaches the management room. Turned off, both are left to
+        # the log, where nothing reads them until a call has already failed.
+        sip_down: true
+        trunk_missing: true
 
     # How the caller ghost's LiveKit participant identity is derived. It must
     # match what the Element Call build your clients run derives for itself:

@@ -13,7 +13,6 @@ import (
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
-	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/calls"
@@ -38,14 +37,11 @@ func (sc *SIPClient) Connect(ctx context.Context) {
 	// The startup context is cancelled once Connect returns, and the resync
 	// outlives it.
 	go sc.resyncPortals(context.WithoutCancel(ctx))
-	if sc.conn.sipReady() {
-		sc.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
-		return
-	}
-	sc.UserLogin.BridgeState.Send(status.BridgeState{
-		StateEvent: status.StateConnecting,
-		Message:    "Starting the SIP endpoint",
-	})
+	// Unconditionally, unlike every later report: this is the first state the
+	// login ever has, so there is nothing for it to differ from. watchSIPHealth
+	// keeps it current from here on.
+	state, _ := sc.conn.health.SIP(sc.conn.sipReady())
+	sc.UserLogin.BridgeState.Send(state)
 }
 
 // resyncPortals re-reads the chat info of every portal that already has a room.

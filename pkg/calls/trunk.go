@@ -129,12 +129,7 @@ func (s *Subsystem) runTrunkReconciler(ctx context.Context) {
 	if interval <= 0 {
 		interval = 5 * time.Minute
 	}
-	reconcile := func() {
-		if err := s.reconcileTrunk(ctx); err != nil && ctx.Err() == nil {
-			s.log.Warn().Err(err).Msg("Failed to reconcile LiveKit outbound trunk")
-		}
-	}
-	reconcile()
+	s.reconcileAndReport(ctx)
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -142,8 +137,26 @@ func (s *Subsystem) runTrunkReconciler(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			reconcile()
+			s.reconcileAndReport(ctx)
 		}
+	}
+}
+
+// reconcileAndReport is one reconcile plus its outcome.
+//
+// Both halves are reported, not just the failures: the bridge state it feeds
+// has to be able to say the trunk came back, and nothing else ever will.
+func (s *Subsystem) reconcileAndReport(ctx context.Context) {
+	err := s.reconcileTrunk(ctx)
+	if ctx.Err() != nil {
+		// Shutdown cancelled it; that is not a fault to report.
+		return
+	}
+	if err != nil {
+		s.log.Warn().Err(err).Msg("Failed to reconcile LiveKit outbound trunk")
+	}
+	if s.onTrunkState != nil {
+		s.onTrunkState(err)
 	}
 }
 

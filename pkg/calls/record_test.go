@@ -2,6 +2,7 @@ package calls
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,14 +106,18 @@ func TestAnAnsweredCallRecordsItsDuration(t *testing.T) {
 	if mine, err := h.db.Call.Transition(t.Context(), call, database.StateRinging, database.StateBridged); err != nil || !mine {
 		t.Fatalf("Transition = %v, %v", mine, err)
 	}
-	// Back-date the answer so the record has a duration to report.
+	// Back-date the answer so the record has a duration to report. How the
+	// duration itself renders is TestCallRecordsSayWhatHappened's job, on a
+	// fixed clock: asserting an exact second here would only measure how long
+	// the test took.
 	call.UpdatedAt = call.UpdatedAt.Add(-30 * time.Second)
 
 	if err := h.endCall(t.Context(), call); err != nil {
 		t.Fatalf("endCall: %v", err)
 	}
-	if got := h.intent.bodies(); len(got) != 1 || got[0] != "Incoming call — 30s" {
-		t.Fatalf("the room was told %v, want one \"Incoming call — 30s\"", got)
+	got := h.intent.bodies()
+	if len(got) != 1 || !strings.HasPrefix(got[0], "Incoming call — 3") {
+		t.Fatalf("the room was told %v, want one answered incoming call of about 30s", got)
 	}
 }
 

@@ -75,6 +75,8 @@ func upgradeConfig(helper configupgrade.Helper) {
 	helper.Copy(configupgrade.Str, "calls", "participant_poll_interval")
 	helper.Copy(configupgrade.Bool, "calls", "notices", "call_ended")
 	helper.Copy(configupgrade.Bool, "calls", "notices", "call_failed")
+	helper.Copy(configupgrade.Bool, "calls", "notices", "sip_down")
+	helper.Copy(configupgrade.Bool, "calls", "notices", "trunk_missing")
 
 	helper.Copy(configupgrade.Str, "calls", "livekit", "url")
 	helper.Copy(configupgrade.Str, "calls", "livekit", "api_key")

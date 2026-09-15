@@ -117,8 +117,14 @@ ghost: `Missed call`, `Call declined`, `Incoming call - 1m 20s`,
 plain message rather than a notice, because that is what gives the room an
 unread badge.
 
-The record is on by default and can be turned down to log-only under
-`calls.notices`; see the example config.
+A SIP endpoint that stops being usable and a LiveKit trunk that cannot be
+reconciled are reported as bridge state instead, which reaches the management
+room when `bridge_status_notices` is `errors` or `all`. Both are transient
+states, so a blip is silent and only an outage lasting three minutes is
+reported.
+
+Each of these categories is on by default and can be turned down to log-only
+under `calls.notices`; see the example config.
 
 ### Ending a call
 

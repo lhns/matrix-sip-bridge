@@ -3,6 +3,7 @@ package calls
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -160,5 +161,31 @@ func TestReconcileTrunkDoesNotRewriteWhenPasswordIsWithheld(t *testing.T) {
 	}
 	if writes != 1 {
 		t.Errorf("issued %d updates, want exactly one", writes)
+	}
+}
+
+// A trunk lost with Redis makes every call fail with no other symptom, and
+// nothing outside the log knew: the reconciler reports both halves of its
+// outcome so the bridge state can follow it.
+func TestTheTrunkReconcilerReportsEveryOutcome(t *testing.T) {
+	f := newFakeLiveKit(t)
+	f.status["ListSIPOutboundTrunk"] = http.StatusInternalServerError
+	f.reply["ListSIPOutboundTrunk"] = `{"code":"internal","msg":"redis is gone"}`
+	f.reply["CreateSIPOutboundTrunk"] = `{"sip_trunk_id":"ST_created","name":"` + testTrunkName + `"}`
+
+	s := trunkSubsystem(f, zerolog.Nop())
+	var reported []error
+	s.OnTrunkState(func(err error) { reported = append(reported, err) })
+
+	s.reconcileAndReport(t.Context())
+	if len(reported) != 1 || reported[0] == nil {
+		t.Fatalf("a LiveKit that is down reported %v, want one failure", reported)
+	}
+
+	delete(f.status, "ListSIPOutboundTrunk")
+	f.reply["ListSIPOutboundTrunk"] = `{"items":[]}`
+	s.reconcileAndReport(t.Context())
+	if len(reported) != 2 || reported[1] != nil {
+		t.Fatalf("a recreated trunk reported %v, want the recovery too", reported)
 	}
 }

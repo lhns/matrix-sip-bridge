@@ -142,7 +142,15 @@ type Subsystem struct {
 	// map and the table cannot disagree about a call that survived one.
 	seenMu sync.Mutex
 	seen   map[string]bool
+
+	// onTrunkState is told the outcome of every trunk reconcile. It is set
+	// once, before Run starts the reconciler, because the bridge state it
+	// feeds lives in the connector and this package cannot reach it.
+	onTrunkState func(error)
 }
+
+// OnTrunkState registers the callback. It must be called before Run.
+func (s *Subsystem) OnTrunkState(fn func(error)) { s.onTrunkState = fn }
 
 // New builds the subsystem. Start does the work.
 func New(cfg Config, br *bridgev2.Bridge, loginID networkid.UserLoginID, sip Telephony, db *database.Database, log zerolog.Logger) *Subsystem {

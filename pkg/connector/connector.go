@@ -6,12 +6,14 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/calls"
@@ -23,10 +25,11 @@ import (
 type SIPConnector struct {
 	Config Config
 
-	br    *bridgev2.Bridge
-	sip   *siptransport.Transport
-	calls *calls.Subsystem
-	db    *sipdb.Database
+	br     *bridgev2.Bridge
+	sip    *siptransport.Transport
+	calls  *calls.Subsystem
+	db     *sipdb.Database
+	health *callHealth
 
 	// cancel stops the SIP endpoint and the call subsystem loops.
 	cancel context.CancelFunc
@@ -45,6 +48,7 @@ var (
 func (sc *SIPConnector) Init(bridge *bridgev2.Bridge) {
 	sc.br = bridge
 	sc.Config.applyDefaults()
+	sc.health = newCallHealth(sc.Config.Calls.Notices)
 	sc.db = sipdb.New(bridge.DB.Database, bridge.Log.With().Str("db_section", "sip").Logger())
 	bridge.Commands.(*commands.Processor).AddHandlers(sc.dialCommand())
 	// Init is the last point before the appservice HTTP server starts serving.
@@ -74,6 +78,8 @@ func (sc *SIPConnector) Start(ctx context.Context) error {
 		sc.br.Log.With().Str("component", "calls").Logger(),
 	)
 
+	sc.calls.OnTrunkState(func(err error) { sc.report(sc.health.Trunk(err)) })
+
 	if err := sc.calls.Start(ctx, sc.eventRegistrar()); err != nil {
 		cancel()
 		return err
@@ -95,7 +101,46 @@ func (sc *SIPConnector) Start(ctx context.Context) error {
 		}
 	}()
 	go sc.calls.Run(runCtx)
+	go sc.watchSIPHealth(runCtx)
 	return nil
+}
+
+// sipHealthInterval is how often the endpoint is asked whether it is still
+// usable. There is no event for a REGISTER that stopped being refreshed, so
+// the alternative to polling is finding out when a call fails.
+const sipHealthInterval = 10 * time.Second
+
+// watchSIPHealth keeps the bridge state in step with the endpoint.
+//
+// Nothing logs here: siptransport already logs every failed REGISTER, which is
+// what a deployment with calls.notices.sip_down turned off is left with.
+func (sc *SIPConnector) watchSIPHealth(ctx context.Context) {
+	t := time.NewTicker(sipHealthInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			sc.report(sc.health.SIP(sc.sipReady()))
+		}
+	}
+}
+
+// report sends a bridge state that actually changed.
+//
+// The login is looked up each time rather than held: the SIP endpoint and the
+// trunk are reconciled before anyone has logged in, and there is nobody to
+// tell until they have. Connect sends the state unconditionally when they do.
+func (sc *SIPConnector) report(state status.BridgeState, changed bool) {
+	if !changed {
+		return
+	}
+	login := sc.br.GetCachedUserLoginByID(networkid.UserLoginID(LoginID))
+	if login == nil {
+		return
+	}
+	login.BridgeState.Send(state)
 }
 
 // sipReady reports whether the SIP endpoint is usable, for the bridge state.
