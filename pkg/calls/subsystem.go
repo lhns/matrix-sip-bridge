@@ -903,7 +903,8 @@ func (s *Subsystem) onMatrixJoinedCall(ctx context.Context, portal *bridgev2.Por
 	}
 	if call == nil {
 		log.Info().Msg("RTC membership in a portal with no call, dialling out")
-		_, err = s.Dial(ctx, portal)
+		// dial, not Dial: the lookup Dial would repeat is the one just made.
+		_, err = s.dial(ctx, portal)
 		return err
 	}
 	if call.State != database.StateRinging {
@@ -979,19 +980,30 @@ func (s *Subsystem) bridgeMedia(ctx context.Context, call *database.Call) error 
 	return s.db.Call.Update(ctx, call)
 }
 
-// Dial places an outbound call to the number a portal represents.
+// Dial places an outbound call to the number a portal represents, unless one
+// is already in progress there.
 func (s *Subsystem) Dial(ctx context.Context, portal *bridgev2.Portal) (*database.Call, error) {
+	if !s.cfg.Enabled {
+		return nil, fmt.Errorf("call bridging is disabled")
+	}
+	if existing, err := s.activeCallByPortal(ctx, string(portal.ID)); err != nil {
+		return nil, err
+	} else if existing != nil {
+		return existing, nil
+	}
+	return s.dial(ctx, portal)
+}
+
+// dial places the call. The caller owns the check that the portal has no call
+// in progress; repeating it here cost a second identical query on the path the
+// Matrix call button takes.
+func (s *Subsystem) dial(ctx context.Context, portal *bridgev2.Portal) (*database.Call, error) {
 	if !s.cfg.Enabled {
 		return nil, fmt.Errorf("call bridging is disabled")
 	}
 	portalID := string(portal.ID)
 	if portal.MXID == "" {
 		return nil, fmt.Errorf("portal %s has no Matrix room", portalID)
-	}
-	if existing, err := s.activeCallByPortal(ctx, portalID); err != nil {
-		return nil, err
-	} else if existing != nil {
-		return existing, nil
 	}
 	if s.cfg.OutboundURI == "" {
 		return nil, fmt.Errorf("calls.outbound_uri is not configured")
