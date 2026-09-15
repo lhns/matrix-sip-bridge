@@ -322,13 +322,19 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, portalID, conference s
 	if portal.MXID == "" {
 		return nil, fmt.Errorf("portal %s has no Matrix room", portalID)
 	}
+	ghost, err := s.ghostFor(ctx, portalID)
+	if err != nil {
+		return nil, err
+	}
+	callID := newCallID()
 	call = &database.Call{
-		CallID:     newCallID(),
+		CallID:     callID,
 		PortalID:   portalID,
 		RoomID:     portal.MXID,
 		Direction:  database.DirectionInbound,
 		Conference: conference,
 		LKRoom:     LiveKitRoomName(portal.MXID.String(), SlotRoom),
+		LKIdentity: s.identityFor(ghost.Intent.GetMXID(), callID).participant,
 		State:      database.StateRinging,
 	}
 	if err := s.db.Call.Insert(ctx, call); err != nil {
@@ -347,14 +353,14 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, portalID, conference s
 			}
 		}
 	}()
-	membership, err := s.publishGhostMembership(ctx, call)
+	membership, err := s.publishGhostMembership(ctx, ghost, call)
 	if err != nil {
 		return nil, fmt.Errorf("publish ghost RTC membership: %w", err)
 	}
 	// A failed notification is not a failed call: the membership alone still
 	// lets someone who opens the room join it, which is better than declining
 	// a caller that could have been answered.
-	if notify, err := s.publishRingNotification(ctx, call, membership); err != nil {
+	if notify, err := s.publishRingNotification(ctx, ghost, call, membership); err != nil {
 		s.log.Warn().Err(err).Str("call_id", call.CallID).
 			Msg("Failed to send the ring notification; Matrix clients will not ring for this call")
 	} else {
@@ -994,14 +1000,20 @@ func (s *Subsystem) Dial(ctx context.Context, portal *bridgev2.Portal) (*databas
 		return nil, fmt.Errorf("the SIP transport is not running")
 	}
 
+	ghost, err := s.ghostFor(ctx, portalID)
+	if err != nil {
+		return nil, err
+	}
 	conference := s.conferenceFor(portalID)
+	callID := newCallID()
 	call := &database.Call{
-		CallID:     newCallID(),
+		CallID:     callID,
 		PortalID:   portalID,
 		RoomID:     portal.MXID,
 		Direction:  database.DirectionOutbound,
 		Conference: conference,
 		LKRoom:     LiveKitRoomName(portal.MXID.String(), SlotRoom),
+		LKIdentity: s.identityFor(ghost.Intent.GetMXID(), callID).participant,
 		State:      database.StateRinging,
 	}
 	if err := s.db.Call.Insert(ctx, call); err != nil {
@@ -1012,7 +1024,7 @@ func (s *Subsystem) Dial(ctx context.Context, portal *bridgev2.Portal) (*databas
 	// No ring notification for an outbound call: the Matrix side started it
 	// and is already in the session, so notifying it would ring the caller's
 	// own phone.
-	if _, err := s.publishGhostMembership(ctx, call); err != nil {
+	if _, err := s.publishGhostMembership(ctx, ghost, call); err != nil {
 		s.log.Warn().Err(err).Str("call_id", call.CallID).
 			Msg("Failed to publish ghost RTC membership for outbound call")
 	}

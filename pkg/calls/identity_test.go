@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix/id"
 )
 
 // The two vectors below come from the MSC4195 appendix and are cross-checked
@@ -162,5 +163,42 @@ func TestDefaultIdentitySchemeIsUserDevice(t *testing.T) {
 	memberID := MemberIDFor(s.cfg.IdentityScheme, user, device, "ignored")
 	if got := ParticipantIdentityFor(s.cfg.IdentityScheme, user, device, memberID); got != memberID {
 		t.Errorf("identity %q is not the member ID %q", got, memberID)
+	}
+}
+
+// The participant identity is now written by the INSERT that creates the call
+// row, while the member ID is published later by publishGhostMembership. Both
+// come from identityFor so that they cannot drift; a drift is inaudible on
+// both sides and reports no error anywhere.
+func TestIdentityForIsSelfConsistent(t *testing.T) {
+	const (
+		user   = id.UserID("@sip_15551234567:example.com")
+		callID = "0123456789abcdef0123456789abcdef"
+	)
+	for _, scheme := range []IdentityScheme{IdentityUserDevice, IdentityHashed} {
+		t.Run(string(scheme), func(t *testing.T) {
+			s := New(Config{IdentityScheme: scheme}, nil, "", nil, nil, zerolog.Nop())
+			ident := s.identityFor(user, callID)
+
+			if ident.userID != user {
+				t.Errorf("userID = %q, want %q", ident.userID, user)
+			}
+			if ident.deviceID != deviceIDFor(callID) {
+				t.Errorf("deviceID = %q, want %q", ident.deviceID, deviceIDFor(callID))
+			}
+			wantMember := MemberIDFor(scheme, user.String(), ident.deviceID, callID)
+			if ident.membershipID != wantMember {
+				t.Errorf("membershipID = %q, want %q", ident.membershipID, wantMember)
+			}
+			want := ParticipantIdentityFor(scheme, user.String(), ident.deviceID, ident.membershipID)
+			if ident.participant != want {
+				t.Errorf("participant = %q, want %q", ident.participant, want)
+			}
+			// Derived twice for the same call, it has to come out the same:
+			// the row is written before the membership is published.
+			if again := s.identityFor(user, callID); again != ident {
+				t.Errorf("identityFor is not deterministic: %+v then %+v", ident, again)
+			}
+		})
 	}
 }

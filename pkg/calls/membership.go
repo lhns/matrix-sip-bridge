@@ -24,6 +24,33 @@ func deviceIDFor(callID string) string {
 	return "SIP" + strings.ToUpper(callID[:8])
 }
 
+// callIdentity is the set of names one call's RTC membership and its LiveKit
+// participant share.
+//
+// The member ID published in Matrix and the identity handed to
+// CreateSIPParticipant are derived together on purpose: a disagreement between
+// the two is the same silent-audio bug as picking the wrong scheme.
+type callIdentity struct {
+	userID       id.UserID
+	deviceID     string
+	membershipID string
+	participant  string
+}
+
+// identityFor derives the whole set from the ghost's MXID and the call ID,
+// with no I/O of its own, so the participant identity can be written by the
+// INSERT that creates the call row rather than by an UPDATE afterwards.
+func (s *Subsystem) identityFor(userID id.UserID, callID string) callIdentity {
+	deviceID := deviceIDFor(callID)
+	membershipID := MemberIDFor(s.cfg.IdentityScheme, userID.String(), deviceID, callID)
+	return callIdentity{
+		userID:       userID,
+		deviceID:     deviceID,
+		membershipID: membershipID,
+		participant:  ParticipantIdentityFor(s.cfg.IdentityScheme, userID.String(), deviceID, membershipID),
+	}
+}
+
 // publishGhostMembership announces the caller as a participant of the room's
 // RTC session, which is what makes the call joinable. It returns the event ID
 // so the ring notification can reference the membership it belongs to.
@@ -36,25 +63,11 @@ func deviceIDFor(callID string) string {
 // sender, so appservice masquerading is load-bearing here.
 //
 // There is no refresh timer; see Config.MembershipExpiry.
-func (s *Subsystem) publishGhostMembership(ctx context.Context, call *database.Call) (id.EventID, error) {
-	ghost, err := s.ghostFor(ctx, call.PortalID)
-	if err != nil {
-		return "", err
-	}
-	userID := ghost.Intent.GetMXID()
-	deviceID := deviceIDFor(call.CallID)
-	membershipID := MemberIDFor(s.cfg.IdentityScheme, userID.String(), deviceID, call.CallID)
-
-	// The identity handed to CreateSIPParticipant and the member ID published
-	// here are derived together on purpose: a disagreement between the two is
-	// the same silent-audio bug as picking the wrong scheme.
-	call.LKIdentity = ParticipantIdentityFor(s.cfg.IdentityScheme, userID.String(), deviceID, membershipID)
-	if err := s.db.Call.Update(ctx, call); err != nil {
-		return "", err
-	}
+func (s *Subsystem) publishGhostMembership(ctx context.Context, ghost *bridgev2.Ghost, call *database.Call) (id.EventID, error) {
+	ident := s.identityFor(ghost.Intent.GetMXID(), call.CallID)
 	s.warnIfEncrypted(ctx, ghost, call.RoomID)
-	stateKey := s.stateKeyFor(ctx, ghost, call.RoomID, userID, deviceID)
-	content := ghostMembership(userID, call.RoomID, deviceID, membershipID,
+	stateKey := s.stateKeyFor(ctx, ghost, call.RoomID, ident.userID, ident.deviceID)
+	content := ghostMembership(ident.userID, call.RoomID, ident.deviceID, ident.membershipID,
 		s.cfg.LiveKit.JWTServiceURL, s.cfg.MembershipExpiry)
 	resp, err := ghost.Intent.SendState(ctx, call.RoomID, CallMemberEventType, stateKey, content, time.Time{})
 	if err != nil {
@@ -71,11 +84,7 @@ func (s *Subsystem) publishGhostMembership(ctx context.Context, call *database.C
 //
 // Nothing retracts this event. Its lifetime is the ring timeout, so the ring
 // stops on its own at exactly the moment the bridge gives up on the call.
-func (s *Subsystem) publishRingNotification(ctx context.Context, call *database.Call, membership id.EventID) (id.EventID, error) {
-	ghost, err := s.ghostFor(ctx, call.PortalID)
-	if err != nil {
-		return "", err
-	}
+func (s *Subsystem) publishRingNotification(ctx context.Context, ghost *bridgev2.Ghost, call *database.Call, membership id.EventID) (id.EventID, error) {
 	content := ringNotification(time.Now(), s.cfg.RingTimeout, membership, s.humanMembers(ctx, call.RoomID))
 	resp, err := ghost.Intent.SendMessage(ctx, call.RoomID, RtcNotificationEventType, content, nil)
 	if err != nil {
