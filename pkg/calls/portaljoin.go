@@ -51,11 +51,11 @@ func ensureUserInRoom(ctx context.Context, roomID id.RoomID, userID id.UserID, d
 // bridgev2 only invites the owning user while it is creating the room, and
 // never retries afterwards, so a portal whose invite was declined or ignored
 // would stay unusable forever. Double puppeting turns that invite into a join.
-func (s *Subsystem) ensureUserInPortal(ctx context.Context, portal *bridgev2.Portal, source *bridgev2.UserLogin) {
+func (b *bridgeSide) ensureUserInPortal(ctx context.Context, portal *bridgev2.Portal, source *bridgev2.UserLogin) {
 	if portal.MXID == "" {
 		return
 	}
-	log := s.log.With().
+	log := b.log.With().
 		Str("portal_id", string(portal.ID)).
 		Stringer("user_id", source.UserMXID).
 		Logger()
@@ -63,7 +63,7 @@ func (s *Subsystem) ensureUserInPortal(ctx context.Context, portal *bridgev2.Por
 	if intent := source.User.DoublePuppet(ctx); intent != nil {
 		dp = intent
 	}
-	joined, err := ensureUserInRoom(ctx, portal.MXID, source.UserMXID, dp, s.br.Bot)
+	joined, err := ensureUserInRoom(ctx, portal.MXID, source.UserMXID, dp, b.br.Bot)
 	switch {
 	case joined:
 		log.Debug().Msg("Matrix user is in the portal room")

@@ -94,16 +94,11 @@ type Config struct {
 // portals used as identity and room substrate.
 type Subsystem struct {
 	cfg Config
-	br  *bridgev2.Bridge
+	mx  matrixSide
 	sip Telephony
 	lk  *LiveKitClient
 	db  *database.Database
 	log zerolog.Logger
-
-	// loginID names the bridge's one static UserLogin. Every portal bridgev2
-	// creates needs it as the source; there is no per-user login to take it
-	// from.
-	loginID networkid.UserLoginID
 
 	trunkID atomic.Pointer[string]
 
@@ -143,11 +138,6 @@ type Subsystem struct {
 	// map and the table cannot disagree about a call that survived one.
 	seenMu sync.Mutex
 	seen   map[string]bool
-
-	// repaired names the portal rooms already known to carry the power levels
-	// a call needs, so reapplyChatInfo reads them once rather than on every
-	// call. A room never loses them again.
-	repaired sync.Map // id.RoomID -> struct{}
 }
 
 // New builds the subsystem. Start does the work.
@@ -166,8 +156,7 @@ func New(cfg Config, br *bridgev2.Bridge, loginID networkid.UserLoginID, sip Tel
 	}
 	return &Subsystem{
 		cfg:      cfg,
-		br:       br,
-		loginID:  loginID,
+		mx:       newBridgeSide(br, loginID, log),
 		sip:      sip,
 		lk:       NewLiveKitClient(cfg.LiveKit),
 		db:       db,
@@ -361,7 +350,7 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, callID, portalID, conf
 	if portal.MXID == "" {
 		return nil, fmt.Errorf("portal %s has no Matrix room", portalID)
 	}
-	ghost, err := s.ghostFor(ctx, portalID)
+	intent, err := s.ghostFor(ctx, portalID)
 	if err != nil {
 		return nil, err
 	}
@@ -372,7 +361,7 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, callID, portalID, conf
 		Direction:  database.DirectionInbound,
 		Conference: conference,
 		LKRoom:     LiveKitRoomName(portal.MXID.String(), SlotRoom),
-		LKIdentity: s.identityFor(ghost.Intent.GetMXID(), callID).participant,
+		LKIdentity: s.identityFor(intent.GetMXID(), callID).participant,
 		State:      database.StateRinging,
 	}
 	if err := s.db.Call.Insert(ctx, call); err != nil {
@@ -391,14 +380,14 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, callID, portalID, conf
 			}
 		}
 	}()
-	membership, err := s.publishGhostMembership(ctx, ghost, call)
+	membership, err := s.publishGhostMembership(ctx, intent, call)
 	if err != nil {
 		return nil, fmt.Errorf("publish ghost RTC membership: %w", err)
 	}
 	// A failed notification is not a failed call: the membership alone still
 	// lets someone who opens the room join it, which is better than declining
 	// a caller that could have been answered.
-	if notify, err := s.publishRingNotification(ctx, ghost, call, membership); err != nil {
+	if notify, err := s.publishRingNotification(ctx, intent, call, membership); err != nil {
 		s.log.Warn().Err(err).Str("call_id", call.CallID).
 			Msg("Failed to send the ring notification; Matrix clients will not ring for this call")
 	} else {
@@ -764,100 +753,15 @@ func (s *Subsystem) takeLeg(callID string) OutboundLeg {
 	return leg
 }
 
-// ghostFor returns the ghost representing a phone number.
-func (s *Subsystem) ghostFor(ctx context.Context, portalID string) (*bridgev2.Ghost, error) {
-	return s.br.GetGhostByID(ctx, networkid.UserID(portalID))
+// ghostFor returns the intent of the ghost representing a phone number.
+func (s *Subsystem) ghostFor(ctx context.Context, portalID string) (GhostIntent, error) {
+	return s.mx.GhostIntent(ctx, portalID)
 }
 
 // portalForNumber returns the portal for a number, creating the Matrix room if
 // it does not exist yet.
-func (s *Subsystem) portalForNumber(ctx context.Context, portalID string) (*bridgev2.Portal, error) {
-	key := networkid.PortalKey{ID: networkid.PortalID(portalID)}
-	portal, err := s.br.GetPortalByKey(ctx, key)
-	if err != nil {
-		return nil, fmt.Errorf("get portal %s: %w", portalID, err)
-	}
-	source, err := s.sourceLogin()
-	if err != nil {
-		return nil, err
-	}
-	if portal.MXID == "" {
-		// The room info is left to bridgev2, which asks the login's
-		// GetChatInfo for it. That is the same call the inbound SMS path makes
-		// through QueueRemoteEvent, so both paths land on one portal per
-		// number rather than two descriptions of it that can drift.
-		if err := portal.CreateMatrixRoom(ctx, source, nil); err != nil {
-			return nil, fmt.Errorf("create room for %s: %w", portalID, err)
-		}
-	} else {
-		s.reapplyChatInfo(ctx, portal, source)
-	}
-	// Every call, not just the first: GetChatInfo lists only the ghost, so
-	// bridgev2 leaves the Matrix user to UserLogin.MarkInPortal, which runs
-	// before the room exists and caches itself as done. Nothing else ever
-	// rechecks the user's membership.
-	s.ensureUserInPortal(ctx, portal, source)
-	return portal, nil
-}
-
-// reapplyChatInfo repairs a portal that was created before the call-capable
-// power levels existed.
-//
-// bridgev2 applies the power level overrides while creating a room and never
-// revisits them, so without this an older portal would stay uncallable
-// forever. It runs on every call, so a room found to need nothing is
-// remembered: the check itself is a state read, and re-sending room state is
-// both a write against the database for no reason and a change clients render.
-func (s *Subsystem) reapplyChatInfo(ctx context.Context, portal *bridgev2.Portal, source *bridgev2.UserLogin) {
-	if _, done := s.repaired.Load(portal.MXID); done {
-		return
-	}
-	levels, err := s.br.Matrix.GetPowerLevels(ctx, portal.MXID)
-	if err != nil {
-		s.log.Warn().Err(err).Str("portal_id", string(portal.ID)).
-			Msg("Could not read the portal's power levels")
-		return
-	}
-	if callPowerLevelsApplied(levels) {
-		s.repaired.Store(portal.MXID, struct{}{})
-		return
-	}
-	info, err := source.Client.GetChatInfo(ctx, portal)
-	if err != nil {
-		s.log.Warn().Err(err).Str("portal_id", string(portal.ID)).
-			Msg("Could not refresh the portal description")
-		return
-	}
-	s.log.Info().Str("portal_id", string(portal.ID)).
-		Msg("Granting the portal the power levels a call needs")
-	portal.UpdateInfo(ctx, info, source, nil, time.Time{})
-}
-
-// callPowerLevelsApplied reports whether a room already lets its members send
-// the RTC membership, i.e. whether there is anything to repair.
-func callPowerLevelsApplied(levels *event.PowerLevelsEventContent) bool {
-	if levels == nil {
-		return false
-	}
-	for evtType, want := range MembershipPowerLevels() {
-		if levels.GetEventLevel(evtType) != want {
-			return false
-		}
-	}
-	return true
-}
-
-// sourceLogin returns the login every portal is created on behalf of.
-//
-// bridgev2 dereferences the source unconditionally while creating a room, so a
-// call arriving before anyone has logged in has to fail here rather than panic
-// inside the portal machinery.
-func (s *Subsystem) sourceLogin() (*bridgev2.UserLogin, error) {
-	login := s.br.GetCachedUserLoginByID(s.loginID)
-	if login == nil {
-		return nil, fmt.Errorf("no %q login yet; nobody has logged in", s.loginID)
-	}
-	return login, nil
+func (s *Subsystem) portalForNumber(ctx context.Context, portalID string) (Portal, error) {
+	return s.mx.PortalRoom(ctx, portalID)
 }
 
 // handleCallMember reacts to a Matrix user joining or leaving the RTC session
@@ -871,14 +775,14 @@ func (s *Subsystem) handleCallMember(ctx context.Context, evt *event.Event) {
 		return
 	}
 	// Ignore the bridge's own ghosts, or the bridge would answer itself.
-	if _, isGhost := s.br.Matrix.ParseGhostMXID(evt.Sender); isGhost {
+	if s.mx.IsGhost(evt.Sender) {
 		return
 	}
-	if evt.Sender == s.br.Bot.GetMXID() {
+	if evt.Sender == s.mx.BotMXID() {
 		return
 	}
-	portal, err := s.br.GetPortalByMXID(ctx, evt.RoomID)
-	if err != nil || portal == nil {
+	portal, ok := s.mx.PortalByMXID(ctx, evt.RoomID)
+	if !ok {
 		return
 	}
 	content, active, err := ParseCallMember(evt.Content.VeryRaw, time.UnixMilli(evt.Timestamp))
@@ -889,7 +793,7 @@ func (s *Subsystem) handleCallMember(ctx context.Context, evt *event.Event) {
 		return
 	}
 	log := s.log.With().
-		Str("portal_id", string(portal.ID)).
+		Str("portal_id", portal.ID).
 		Stringer("sender", evt.Sender).
 		Bool("active", active).
 		Logger()
@@ -916,10 +820,10 @@ func (s *Subsystem) handleCallMember(ctx context.Context, evt *event.Event) {
 // by the room, so a decline sent late — by a second device, or for a call that
 // already ended — cannot reject a different call in the same portal.
 func (s *Subsystem) handleRtcDecline(ctx context.Context, evt *event.Event) {
-	if _, isGhost := s.br.Matrix.ParseGhostMXID(evt.Sender); isGhost {
+	if s.mx.IsGhost(evt.Sender) {
 		return
 	}
-	if evt.Sender == s.br.Bot.GetMXID() {
+	if evt.Sender == s.mx.BotMXID() {
 		return
 	}
 	notify, ok := declineTarget(evt.Content.VeryRaw)
@@ -942,9 +846,8 @@ func (s *Subsystem) handleRtcDecline(ctx context.Context, evt *event.Event) {
 // this state event: there is no Matrix event that says "dial the phone", so a
 // membership appearing in a portal room with no call in progress is read as a
 // request to place one.
-func (s *Subsystem) onMatrixJoinedCall(ctx context.Context, portal *bridgev2.Portal, content *CallMemberContent, log zerolog.Logger) error {
-	portalID := string(portal.ID)
-	call, err := s.activeCallByPortal(ctx, portalID)
+func (s *Subsystem) onMatrixJoinedCall(ctx context.Context, portal Portal, content *CallMemberContent, log zerolog.Logger) error {
+	call, err := s.activeCallByPortal(ctx, portal.ID)
 	if err != nil {
 		return fmt.Errorf("look up call: %w", err)
 	}
@@ -967,8 +870,8 @@ func (s *Subsystem) onMatrixJoinedCall(ctx context.Context, portal *bridgev2.Por
 // Only a call still in progress is acted on: a leave event for a call that
 // already ended is normal, because clients retract their membership after the
 // far end hangs up.
-func (s *Subsystem) onMatrixLeftCall(ctx context.Context, portal *bridgev2.Portal, log zerolog.Logger) {
-	call, err := s.activeCallByPortal(ctx, string(portal.ID))
+func (s *Subsystem) onMatrixLeftCall(ctx context.Context, portal Portal, log zerolog.Logger) {
+	call, err := s.activeCallByPortal(ctx, portal.ID)
 	if err != nil || call == nil {
 		return
 	}
@@ -1035,11 +938,11 @@ func (s *Subsystem) bridgeMedia(ctx context.Context, call *database.Call) error 
 
 // Dial places an outbound call to the number a portal represents, unless one
 // is already in progress there.
-func (s *Subsystem) Dial(ctx context.Context, portal *bridgev2.Portal) (*database.Call, error) {
+func (s *Subsystem) Dial(ctx context.Context, portal Portal) (*database.Call, error) {
 	if !s.cfg.Enabled {
 		return nil, fmt.Errorf("call bridging is disabled")
 	}
-	if existing, err := s.activeCallByPortal(ctx, string(portal.ID)); err != nil {
+	if existing, err := s.activeCallByPortal(ctx, portal.ID); err != nil {
 		return nil, err
 	} else if existing != nil {
 		return existing, nil
@@ -1050,11 +953,11 @@ func (s *Subsystem) Dial(ctx context.Context, portal *bridgev2.Portal) (*databas
 // dial places the call. The caller owns the check that the portal has no call
 // in progress; repeating it here cost a second identical query on the path the
 // Matrix call button takes.
-func (s *Subsystem) dial(ctx context.Context, portal *bridgev2.Portal) (*database.Call, error) {
+func (s *Subsystem) dial(ctx context.Context, portal Portal) (*database.Call, error) {
 	if !s.cfg.Enabled {
 		return nil, fmt.Errorf("call bridging is disabled")
 	}
-	portalID := string(portal.ID)
+	portalID := portal.ID
 	if portal.MXID == "" {
 		return nil, fmt.Errorf("portal %s has no Matrix room", portalID)
 	}
@@ -1065,7 +968,7 @@ func (s *Subsystem) dial(ctx context.Context, portal *bridgev2.Portal) (*databas
 		return nil, fmt.Errorf("the SIP transport is not running")
 	}
 
-	ghost, err := s.ghostFor(ctx, portalID)
+	intent, err := s.ghostFor(ctx, portalID)
 	if err != nil {
 		return nil, err
 	}
@@ -1078,7 +981,7 @@ func (s *Subsystem) dial(ctx context.Context, portal *bridgev2.Portal) (*databas
 		Direction:  database.DirectionOutbound,
 		Conference: conference,
 		LKRoom:     LiveKitRoomName(portal.MXID.String(), SlotRoom),
-		LKIdentity: s.identityFor(ghost.Intent.GetMXID(), callID).participant,
+		LKIdentity: s.identityFor(intent.GetMXID(), callID).participant,
 		State:      database.StateRinging,
 	}
 	if err := s.db.Call.Insert(ctx, call); err != nil {
@@ -1093,7 +996,7 @@ func (s *Subsystem) dial(ctx context.Context, portal *bridgev2.Portal) (*databas
 	// Without it there is nothing for the Matrix side to join, so the callee
 	// would be answered into a conference with nobody in it and stay there
 	// until they hung up themselves.
-	if _, err := s.publishGhostMembership(ctx, ghost, call); err != nil {
+	if _, err := s.publishGhostMembership(ctx, intent, call); err != nil {
 		_ = s.endCall(ctx, call)
 		return nil, fmt.Errorf("publish ghost RTC membership: %w", err)
 	}

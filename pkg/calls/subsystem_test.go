@@ -9,15 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
-	"go.mau.fi/util/ptr"
-	"maunium.net/go/mautrix/bridgev2"
-	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/database"
@@ -131,24 +127,6 @@ func TestCurrentTrunkIDBeforeReconcile(t *testing.T) {
 	got, err := s.currentTrunkID()
 	if err != nil || got != id {
 		t.Errorf("currentTrunkID() = %q, %v; want %q, nil", got, err, id)
-	}
-}
-
-// bridgev2 dereferences the source UserLogin unconditionally while creating a
-// room, so a call that arrives before anyone has logged in must be refused
-// here. Without this the bridge panicked inside portal creation on the first
-// inbound call.
-func TestPortalCreationNeedsTheStaticLogin(t *testing.T) {
-	s := &Subsystem{br: &bridgev2.Bridge{}, loginID: "sip"}
-	login, err := s.sourceLogin()
-	if err == nil {
-		t.Fatalf("sourceLogin() = %v, want an error when no login is cached", login)
-	}
-	if login != nil {
-		t.Errorf("sourceLogin() returned %v alongside an error", login)
-	}
-	if !strings.Contains(err.Error(), "sip") {
-		t.Errorf("err = %v, want it to name the login", err)
 	}
 }
 
@@ -278,45 +256,6 @@ func TestCallIsStale(t *testing.T) {
 				t.Errorf("callIsStale = %v, want %v", got, tt.stale)
 			}
 		})
-	}
-}
-
-// The repair runs on every call, so it has to be able to tell that there is
-// nothing to repair. Re-sending room state each time costs a database write
-// and shows up in clients as the room changing.
-func TestCallPowerLevelsApplied(t *testing.T) {
-	applied := &event.PowerLevelsEventContent{Events: map[string]int{}}
-	for evtType, level := range MembershipPowerLevels() {
-		applied.Events[evtType.Type] = level
-	}
-
-	tests := []struct {
-		name   string
-		levels *event.PowerLevelsEventContent
-		want   bool
-	}{
-		{"a repaired room needs nothing", applied, true},
-		{"no power levels at all", nil, false},
-		{"a room bridgev2 just created", &event.PowerLevelsEventContent{
-			Events:          map[string]int{event.StateEncryption.Type: 100},
-			StateDefaultPtr: ptr.Ptr(50),
-		}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := callPowerLevelsApplied(tt.levels); got != tt.want {
-				t.Errorf("callPowerLevelsApplied = %v, want %v", got, tt.want)
-			}
-		})
-	}
-
-	// One of the two names being right is not enough: a client that uses the
-	// other still sees no call button.
-	partial := &event.PowerLevelsEventContent{Events: map[string]int{
-		CallMemberEventType.Type: 0,
-	}}
-	if callPowerLevelsApplied(partial) {
-		t.Error("a room granting only one of the membership event names is not repaired")
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
@@ -63,13 +62,13 @@ func (s *Subsystem) identityFor(userID id.UserID, callID string) callIdentity {
 // sender, so appservice masquerading is load-bearing here.
 //
 // There is no refresh timer; see Config.MembershipExpiry.
-func (s *Subsystem) publishGhostMembership(ctx context.Context, ghost *bridgev2.Ghost, call *database.Call) (id.EventID, error) {
-	ident := s.identityFor(ghost.Intent.GetMXID(), call.CallID)
-	s.warnIfEncrypted(ctx, ghost, call.RoomID)
-	stateKey := s.stateKeyFor(ctx, ghost, call.RoomID, ident.userID, ident.deviceID)
+func (s *Subsystem) publishGhostMembership(ctx context.Context, intent GhostIntent, call *database.Call) (id.EventID, error) {
+	ident := s.identityFor(intent.GetMXID(), call.CallID)
+	s.warnIfEncrypted(ctx, intent, call.RoomID)
+	stateKey := s.stateKeyFor(ctx, intent, call.RoomID, ident.userID, ident.deviceID)
 	content := ghostMembership(ident.userID, call.RoomID, ident.deviceID, ident.membershipID,
 		s.cfg.LiveKit.JWTServiceURL, s.cfg.MembershipExpiry)
-	resp, err := ghost.Intent.SendState(ctx, call.RoomID, CallMemberEventType, stateKey, content, time.Time{})
+	resp, err := intent.SendState(ctx, call.RoomID, CallMemberEventType, stateKey, content, time.Time{})
 	if err != nil {
 		return "", err
 	}
@@ -84,9 +83,9 @@ func (s *Subsystem) publishGhostMembership(ctx context.Context, ghost *bridgev2.
 //
 // Its lifetime bounds the ring; retractRingNotification ends it sooner when
 // the call does.
-func (s *Subsystem) publishRingNotification(ctx context.Context, ghost *bridgev2.Ghost, call *database.Call, membership id.EventID) (id.EventID, error) {
+func (s *Subsystem) publishRingNotification(ctx context.Context, intent GhostIntent, call *database.Call, membership id.EventID) (id.EventID, error) {
 	content := ringNotification(time.Now(), s.cfg.RingTimeout, membership, s.humanMembers(ctx, call.RoomID))
-	resp, err := ghost.Intent.SendMessage(ctx, call.RoomID, RtcNotificationEventType, content, nil)
+	resp, err := intent.SendMessage(ctx, call.RoomID, RtcNotificationEventType, content, nil)
 	if err != nil {
 		return "", err
 	}
@@ -96,13 +95,13 @@ func (s *Subsystem) publishRingNotification(ctx context.Context, ghost *bridgev2
 // humanMembers lists the room members that are neither ghosts nor the bridge
 // bot, which is who the ring notification mentions.
 func (s *Subsystem) humanMembers(ctx context.Context, roomID id.RoomID) []id.UserID {
-	members, err := s.br.Matrix.GetMembers(ctx, roomID)
+	members, err := s.mx.Members(ctx, roomID)
 	if err != nil {
 		s.log.Warn().Err(err).Stringer("room_id", roomID).
 			Msg("Could not list room members; the ring notification will mention nobody and may not push")
 		return nil
 	}
-	botMXID := s.br.Bot.GetMXID()
+	botMXID := s.mx.BotMXID()
 	users := make([]id.UserID, 0, len(members))
 	for userID, member := range members {
 		if member == nil || member.Membership != event.MembershipJoin {
@@ -111,7 +110,7 @@ func (s *Subsystem) humanMembers(ctx context.Context, roomID id.RoomID) []id.Use
 		if userID == botMXID {
 			continue
 		}
-		if _, isGhost := s.br.Matrix.ParseGhostMXID(userID); isGhost {
+		if s.mx.IsGhost(userID) {
 			continue
 		}
 		users = append(users, userID)
@@ -134,7 +133,7 @@ func (s *Subsystem) retractRingNotification(ctx context.Context, call *database.
 	if len(notifies) == 0 {
 		return
 	}
-	ghost, err := s.ghostFor(ctx, call.PortalID)
+	intent, err := s.ghostFor(ctx, call.PortalID)
 	if err != nil {
 		s.log.Warn().Err(err).Str("call_id", call.CallID).
 			Msg("Could not retract the ring notification; clients will ring until it lapses")
@@ -142,7 +141,7 @@ func (s *Subsystem) retractRingNotification(ctx context.Context, call *database.
 	}
 	for _, notify := range notifies {
 		content := &event.Content{Parsed: &event.RedactionEventContent{Redacts: notify}}
-		if _, err := ghost.Intent.SendMessage(ctx, call.RoomID, event.EventRedaction, content, nil); err != nil {
+		if _, err := intent.SendMessage(ctx, call.RoomID, event.EventRedaction, content, nil); err != nil {
 			s.log.Warn().Err(err).Str("call_id", call.CallID).Stringer("notification", notify).
 				Msg("Could not retract the ring notification; clients will ring until it lapses")
 		}
@@ -152,13 +151,13 @@ func (s *Subsystem) retractRingNotification(ctx context.Context, call *database.
 // retractGhostMembership publishes the empty content that ends a membership.
 // Matrix has no state deletion, so leaving is an empty state event.
 func (s *Subsystem) retractGhostMembership(ctx context.Context, call *database.Call) error {
-	ghost, err := s.ghostFor(ctx, call.PortalID)
+	intent, err := s.ghostFor(ctx, call.PortalID)
 	if err != nil {
 		return err
 	}
-	userID := ghost.Intent.GetMXID()
-	stateKey := s.stateKeyFor(ctx, ghost, call.RoomID, userID, deviceIDFor(call.CallID))
-	_, err = ghost.Intent.SendState(ctx, call.RoomID, CallMemberEventType, stateKey, leaveMembership(), time.Time{})
+	userID := intent.GetMXID()
+	stateKey := s.stateKeyFor(ctx, intent, call.RoomID, userID, deviceIDFor(call.CallID))
+	_, err = intent.SendState(ctx, call.RoomID, CallMemberEventType, stateKey, leaveMembership(), time.Time{})
 	return err
 }
 
@@ -196,8 +195,8 @@ func (s *Subsystem) sweepStaleMemberships(ctx context.Context, stale []*database
 // with their own MXID. Getting it wrong means the event is refused by the
 // server or ignored by clients, so an unreadable room version falls back to
 // the prefixed form, which every room version accepts.
-func (s *Subsystem) stateKeyFor(ctx context.Context, ghost *bridgev2.Ghost, roomID id.RoomID, userID id.UserID, deviceID string) string {
-	return rtcStateKey(userID, deviceID, SlotRoom, s.ownedStateKeys(ctx, ghost, roomID))
+func (s *Subsystem) stateKeyFor(ctx context.Context, intent GhostIntent, roomID id.RoomID, userID id.UserID, deviceID string) string {
+	return rtcStateKey(userID, deviceID, SlotRoom, s.ownedStateKeys(ctx, intent, roomID))
 }
 
 func rtcStateKey(userID id.UserID, deviceID, slot string, owned bool) string {
@@ -212,12 +211,12 @@ func rtcStateKey(userID id.UserID, deviceID, slot string, owned bool) string {
 // changes, and an upgraded room is a different room.
 var roomVersions sync.Map // id.RoomID -> bool
 
-func (s *Subsystem) ownedStateKeys(ctx context.Context, ghost *bridgev2.Ghost, roomID id.RoomID) bool {
+func (s *Subsystem) ownedStateKeys(ctx context.Context, intent GhostIntent, roomID id.RoomID) bool {
 	if cached, ok := roomVersions.Load(roomID); ok {
 		return cached.(bool)
 	}
 	owned := false
-	if reader, ok := ghost.Intent.(bridgev2.MatrixAPIWithArbitraryRoomState); ok {
+	if reader, ok := intent.(roomStateReader); ok {
 		evt, err := reader.GetStateEvent(ctx, roomID, event.StateCreate, "")
 		if err != nil {
 			s.log.Debug().Err(err).Stringer("room_id", roomID).
@@ -316,11 +315,11 @@ var encryptedRooms sync.Map // id.RoomID -> bool
 // audio into LiveKit, which such a client receives and cannot decode: the call
 // looks connected on both sides and is silent, with no error anywhere. Portal
 // rooms must therefore stay unencrypted.
-func (s *Subsystem) warnIfEncrypted(ctx context.Context, ghost *bridgev2.Ghost, roomID id.RoomID) {
+func (s *Subsystem) warnIfEncrypted(ctx context.Context, intent GhostIntent, roomID id.RoomID) {
 	if _, done := encryptedRooms.Load(roomID); done {
 		return
 	}
-	reader, ok := ghost.Intent.(bridgev2.MatrixAPIWithArbitraryRoomState)
+	reader, ok := intent.(roomStateReader)
 	if !ok {
 		return
 	}
