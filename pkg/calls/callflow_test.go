@@ -214,3 +214,26 @@ func TestBridgeShutdownDuringTheRingTearsTheCallDown(t *testing.T) {
 		t.Errorf("the call redacted %v, want the ring notification", got)
 	}
 }
+
+// The watcher only ever inspected bridged rows, so a row left ringing — an
+// outbound call whose INVITE never returned, or a setup cut short after the
+// membership went out — was cleared only when someone next called that number.
+// Until then the ghost sat in the room's call UI as a participant of a call
+// that had no phone on the other end of it.
+func TestTheWatcherClearsARowLeftRinging(t *testing.T) {
+	h := newHarness(t)
+	call := h.insertRinging(t)
+	h.rememberNotification("$ring", call.CallID)
+	// Older than the ring timeout plus the setup grace, so nothing can still
+	// be ringing for it.
+	h.backdate(t, call, h.cfg.RingTimeout+2*time.Minute)
+
+	h.checkParticipants(t.Context())
+
+	if got := h.activeCall(t); got != nil {
+		t.Fatalf("call %s is still %q; the watcher left it for the next caller to clear", got.CallID, got.State)
+	}
+	if got := h.intent.redactions(); !slices.Contains(got, "$ring") {
+		t.Errorf("the call redacted %v, want the ring notification", got)
+	}
+}

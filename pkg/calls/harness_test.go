@@ -343,3 +343,17 @@ func (h *harness) insertRinging(t *testing.T) *database.Call {
 	}
 	return call
 }
+
+// backdate moves a row's timestamps into the past, which is how a test reaches
+// a state only the passage of time produces.
+func (h *harness) backdate(t *testing.T, call *database.Call, by time.Duration) {
+	t.Helper()
+	then := time.Now().Add(-by).UnixMilli()
+	_, err := h.db.Exec(context.Background(),
+		"UPDATE sip_call SET created_at = $2, updated_at = $2 WHERE call_id = $1", call.CallID, then)
+	if err != nil {
+		t.Fatalf("backdate call: %v", err)
+	}
+	call.CreatedAt = time.UnixMilli(then)
+	call.UpdatedAt = time.UnixMilli(then)
+}

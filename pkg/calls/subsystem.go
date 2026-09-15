@@ -516,16 +516,31 @@ func (s *Subsystem) activeCallByConference(ctx context.Context, conference strin
 }
 
 func (s *Subsystem) discardIfStale(ctx context.Context, call *database.Call, err error) (*database.Call, error) {
-	if err != nil || call == nil || !s.callIsStale(call, time.Now()) {
+	if err != nil || call == nil {
 		return call, err
 	}
-	s.log.Warn().Str("call_id", call.CallID).Str("state", string(call.State)).
-		Time("updated_at", call.UpdatedAt).
-		Msg("Discarding a call that cannot still be in progress")
-	if err := s.endCallAs(ctx, call, callEnd{Quiet: true}); err != nil {
+	stale, err := s.endIfStale(ctx, call)
+	if err != nil || stale {
 		return nil, err
 	}
-	return nil, nil
+	return call, nil
+}
+
+// endIfStale ends a row that claims to be in progress but cannot be, and
+// reports whether it did.
+//
+// The end is quiet: such a row is the wreckage of an interrupted setup or of a
+// call whose end was never observed, and announcing it in the timeline now
+// would post a missed call long after the phone stopped ringing.
+func (s *Subsystem) endIfStale(ctx context.Context, call *database.Call) (bool, error) {
+	if !s.callIsStale(call, time.Now()) {
+		return false, nil
+	}
+	s.log.Warn().Str("call_id", call.CallID).Str("state", string(call.State)).
+		Time("created_at", call.CreatedAt).
+		Time("updated_at", call.UpdatedAt).
+		Msg("Discarding a call that cannot still be in progress")
+	return true, s.endCallAs(ctx, call, callEnd{Quiet: true})
 }
 
 // callIsStale reports whether a row claiming to be in progress cannot be.
@@ -1124,6 +1139,22 @@ func (s *Subsystem) checkParticipants(ctx context.Context) {
 		return
 	}
 	for _, call := range active {
+		// A row that is not bridged has no participant to look for, so the
+		// staleness rule is the only thing that can decide it. Applying it
+		// here as well as on lookup is what bounds the ghost membership a
+		// half-built call leaves in the room by the poll interval, rather
+		// than by whenever someone next calls that number.
+		stale, err := s.endIfStale(ctx, call)
+		if err != nil {
+			if ctx.Err() == nil {
+				s.log.Warn().Err(err).Str("call_id", call.CallID).
+					Msg("Failed to discard a call that cannot still be in progress")
+			}
+			continue
+		}
+		if stale {
+			continue
+		}
 		if call.State != database.StateBridged || call.LKIdentity == "" {
 			continue
 		}
