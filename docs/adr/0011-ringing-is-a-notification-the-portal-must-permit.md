@@ -58,7 +58,7 @@ an unbounded set of human members, and `state_default` must stay at 50 so the
 room cannot be encrypted or tombstoned by a member (ADR-0010).
 
 bridgev2 applies those overrides while creating a room and never revisits them,
-so the call subsystem re-applies the connector's `ChatInfo` to an existing
+so the bridgev2 adapter re-applies the connector's `ChatInfo` to an existing
 portal. That is what repairs portals created before this decision. It checks
 the room's power levels first and does nothing when there is nothing to
 repair, because re-sending room state on every call is both a write for no

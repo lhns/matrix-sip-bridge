@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted
+Accepted, amended by [ADR-0011](0011-ringing-is-a-notification-the-portal-must-permit.md)
+
+What makes a client ring is the MSC4075 notification, not the RTC membership
+this ADR publishes. The membership only makes the call joinable.
 
 ## Context
 
@@ -18,11 +21,14 @@ park a call in a ConfBridge that livekit-sip then dials.
 
 Bridge calls as real media, through a conference the bridge never enters.
 Inbound: the SIP server dials the bridge with the conference name in a header,
-the bridge publishes an RTC membership for the caller's ghost so Matrix rings,
-and calls LiveKit's `CreateSIPParticipant` so livekit-sip dials that conference
-and joins the LiveKit room. The bridge answers only once a Matrix user has
-joined, and the dialplan then hangs its leg up so the caller falls into the
-conference. Outbound: the bridge sends an INVITE carrying the same header and
+the bridge answers 180 at once, publishes an RTC membership for the caller's
+ghost so the call is joinable, sends the ring notification that actually makes
+clients ring (ADR-0011), and calls LiveKit's `CreateSIPParticipant` so
+livekit-sip dials that conference and joins the LiveKit room. The bridge
+answers 200 only once a Matrix user has joined, and the dialplan then hangs its
+leg up so the caller falls into the conference. The 180 precedes all of that on
+purpose: until a provisional response arrives the caller hears nothing, and
+building the portal for a number that has never called before takes seconds. Outbound: the bridge sends an INVITE carrying the same header and
 does the same thing. See [ADR-0008](0008-the-bridge-is-a-sip-endpoint.md) for
 how that replaced AMI.
 

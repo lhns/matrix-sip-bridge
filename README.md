@@ -111,9 +111,9 @@ media either.
 ### What a call leaves behind
 
 Every call that ends puts one message in its portal, sent as the caller's
-ghost: `Missed call`, `Call declined`, `Incoming call - 1m 20s`,
-`Outgoing call - 1m 20s`, `Outgoing call - no answer`, or
-`Call failed - <reason>` when the bridge itself could not carry it. It is a
+ghost: `Missed call`, `Call declined`, `Incoming call — 1m 20s`,
+`Outgoing call — 1m 20s`, `Outgoing call — no answer`, or
+`Call failed — <reason>` when the bridge itself could not carry it. It is a
 plain message rather than a notice, because that is what gives the room an
 unread badge.
 
@@ -382,16 +382,20 @@ pkg/connector/             bridgev2 NetworkConnector and NetworkAPI (messaging)
   client.go                  inbound and outbound SIP MESSAGE
   commands.go                !dial, for numbers with no portal room yet
   config.go                  network config struct and upgrader
+  health.go                  the two faults a call needs, as one bridge state
   readiness.go               the /_health/ready endpoint the k8s probe uses
   example-config.yaml        shipped as the base for config upgrades
 pkg/siptransport/          the SIP user agent: sipgo, no media stack
+  config.go                  endpoint config, its defaults and its validation
   transport.go               listener, registration, request handlers
   call.go                    inbound control leg, outbound INVITE
   message.go                 SIP MESSAGE in and out
   sdp.go                     the answer that must not read as hold
 pkg/calls/                 the call subsystem, independent of bridgev2 plumbing
   subsystem.go               call lifecycle, ring, answer, teardown watch
+  matrixside.go              the narrow interface over bridgev2, and its adapter
   membership.go              publishing the ghost RTC membership and the ring
+  portaljoin.go              joining the Matrix user to a portal it must see
   rtc.go                     MSC3401 call.member parsing
   notification.go            MSC4075 ring notification, MSC4310 decline
   record.go                  the timeline record a finished call leaves behind
@@ -418,10 +422,14 @@ bridgev2's `mxmain` imports `mattn/go-sqlite3` unconditionally. The image builds
 with CGO against musl and links statically, so it still runs on
 `distroless/static`.
 
-Tests are table-driven with the standard library and no framework. Most cover
-mapping and parsing: E.164 normalisation, portal-ID round trips, SDP answers,
-and the LiveKit hash derivations against the MSC4195 golden vectors.
-`pkg/siptransport` additionally runs real SIP conversations against a second
+Tests are table-driven with the standard library and no framework. The mapping
+and parsing ones cover E.164 normalisation, portal-ID round trips, SDP answers,
+and the LiveKit hash derivations against the MSC4195 golden vectors. The weight,
+though, is in `pkg/calls`: `matrixSide` puts bridgev2 behind an interface, so a
+whole inbound or outbound call runs in a test against a fake Matrix side, a fake
+LiveKit HTTP server and a real sqlite database. That band is where every bug a
+live call found has been. `pkg/siptransport` additionally runs real SIP
+conversations against a second
 sipgo user agent over a loopback TCP listener, because the mistakes that matter
 there — a bodyless 200, an SDP that reads as hold, a MESSAGE that is not routed
 — are all wire-level. Nothing talks to a live Asterisk, LiveKit or homeserver.

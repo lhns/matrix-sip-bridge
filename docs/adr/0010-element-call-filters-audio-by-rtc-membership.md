@@ -56,7 +56,9 @@ membership into a room that has an `m.room.encryption` event.
 The membership is published when the call starts and retracted when it ends. It
 is not refreshed; `expires` defaults to six hours, which no call reaches.
 Memberships left behind by a crash are reconciled once at startup against the
-call table.
+call table, and the LiveKit participant goes with each one: retracting only the
+Matrix half left livekit-sip in the room and the caller in the conference with
+nobody to talk to.
 
 ## Consequences
 

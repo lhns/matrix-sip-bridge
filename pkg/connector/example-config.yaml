@@ -84,7 +84,7 @@ calls:
         # notice, because it is what gives the room an unread badge.
         call_ended: true
         # Fold a call the bridge could not carry into that same record, as
-        # "Call failed - no route". Without it a failed call is a phone that
+        # "Call failed — no route". Without it a failed call is a phone that
         # rang and then went silent with no explanation anywhere the user looks.
         call_failed: true
         # A SIP endpoint that is not listening or has lost its registration,

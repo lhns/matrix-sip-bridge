@@ -37,8 +37,8 @@ as the bot alongside the appservice. It was not needed.
 
 Register `EventProcessor.On(event.Type{Type: "org.matrix.msc3401.call.member",
 Class: event.StateEventType}, ...)` from the subsystem's `Start`, and resolve the
-room with `Bridge.GetPortalByMXID`. Outbound memberships go out through
-`MatrixAPI.SendState` with the same type.
+room with `matrixSide.PortalByMXID`. Outbound memberships go out through
+`GhostIntent.SendState` with the same type.
 
 ## Consequences
 

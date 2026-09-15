@@ -79,12 +79,21 @@ or never.
   rooms as `is_direct`, but an existing room gains nothing.
 - `is_direct` is set at room creation and cannot be added afterwards. For rooms
   that already exist, `m.direct` is the only repair.
-- `private_chat_portal_meta` is unrelated: it copies the ghost's name and
-  avatar onto a DM portal, and does nothing here because the portal sets its
-  own name.
+- `private_chat_portal_meta` is a no-op for this bridge, not merely unrelated.
+  It copies the ghost's name and avatar onto a DM portal, and bridgev2 skips
+  that whenever the portal already has a name of its own — which `GetChatInfo`
+  always gives it, the number. Setting it changes nothing.
 - A call the Matrix side *starts* still opens with the camera on. Element X
   only offers a voice intent for a call that already exists, and the bridge
   cannot publish a membership before the user's own membership tells it to
   dial. Answering an inbound call is unaffected.
+- On Android the audio route is a race, not a setting the intent decides
+  ([element-x-android#6315](https://github.com/element-hq/element-x-android/issues/6315)):
+  a call that connects quickly can land on the speaker even with
+  `m.call.intent: audio`, and the same call on the same build can land on the
+  earpiece. Nothing in the bridge can influence it — the intent is already
+  published — so a report of "it came out of the speaker" from an Android
+  client is not evidence that the membership is wrong. iOS and web are not
+  affected.
 - The bridge must not publish a video track. Element Call renders and counts
   video publications regardless of the intent.
