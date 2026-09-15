@@ -143,6 +143,15 @@ type Subsystem struct {
 	seenMu sync.Mutex
 	seen   map[string]bool
 
+	// roomVersions and encryptedRooms cache the two pieces of room state a
+	// call needs, each of which is a homeserver read on a path that is
+	// otherwise local. They are instance fields rather than package globals
+	// so that one subsystem cannot answer for a room another one looked at
+	// -- which, in one test binary, means every earlier test. See
+	// ownedStateKeys and warnIfEncrypted for why each is safe to cache.
+	roomVersions   sync.Map // id.RoomID -> bool
+	encryptedRooms sync.Map // id.RoomID -> bool
+
 	// onTrunkState is told the outcome of every trunk reconcile. It is set
 	// once, before Run starts the reconciler, because the bridge state it
 	// feeds lives in the connector and this package cannot reach it.
@@ -355,14 +364,14 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, callID, portalID, conf
 	} else if existing != nil {
 		return nil, fmt.Errorf("conference %s already has call %s in progress", conference, existing.CallID)
 	}
-	portal, err := s.portalForNumber(ctx, portalID)
+	portal, err := s.mx.PortalRoom(ctx, portalID)
 	if err != nil {
 		return nil, err
 	}
 	if portal.MXID == "" {
 		return nil, fmt.Errorf("portal %s has no Matrix room", portalID)
 	}
-	intent, err := s.ghostFor(ctx, portalID)
+	intent, err := s.mx.GhostIntent(ctx, portalID)
 	if err != nil {
 		return nil, err
 	}
@@ -802,17 +811,6 @@ func (s *Subsystem) takeLeg(callID string) OutboundLeg {
 	return leg
 }
 
-// ghostFor returns the intent of the ghost representing a phone number.
-func (s *Subsystem) ghostFor(ctx context.Context, portalID string) (GhostIntent, error) {
-	return s.mx.GhostIntent(ctx, portalID)
-}
-
-// portalForNumber returns the portal for a number, creating the Matrix room if
-// it does not exist yet.
-func (s *Subsystem) portalForNumber(ctx context.Context, portalID string) (Portal, error) {
-	return s.mx.PortalRoom(ctx, portalID)
-}
-
 // handleCallMember reacts to a Matrix user joining or leaving the RTC session
 // of a portal room.
 //
@@ -834,7 +832,7 @@ func (s *Subsystem) handleCallMember(ctx context.Context, evt *event.Event) {
 	if !ok {
 		return
 	}
-	content, active, err := ParseCallMember(evt.Content.VeryRaw, time.UnixMilli(evt.Timestamp))
+	active, err := ParseCallMember(evt.Content.VeryRaw, time.UnixMilli(evt.Timestamp))
 	if err != nil {
 		s.log.Warn().Err(err).
 			Stringer("event_id", evt.ID).
@@ -851,7 +849,7 @@ func (s *Subsystem) handleCallMember(ctx context.Context, evt *event.Event) {
 		s.onMatrixLeftCall(ctx, portal, log)
 		return
 	}
-	if err := s.onMatrixJoinedCall(ctx, portal, content, log); err != nil {
+	if err := s.onMatrixJoinedCall(ctx, portal, log); err != nil {
 		// Giving up on a call while it rings is a user's decision, not a
 		// fault: logging it as an error trains the reader to skip the real
 		// ones.
@@ -895,7 +893,7 @@ func (s *Subsystem) handleRtcDecline(ctx context.Context, evt *event.Event) {
 // this state event: there is no Matrix event that says "dial the phone", so a
 // membership appearing in a portal room with no call in progress is read as a
 // request to place one.
-func (s *Subsystem) onMatrixJoinedCall(ctx context.Context, portal Portal, content *CallMemberContent, log zerolog.Logger) error {
+func (s *Subsystem) onMatrixJoinedCall(ctx context.Context, portal Portal, log zerolog.Logger) error {
 	call, err := s.activeCallByPortal(ctx, portal.ID)
 	if err != nil {
 		return fmt.Errorf("look up call: %w", err)
@@ -909,7 +907,9 @@ func (s *Subsystem) onMatrixJoinedCall(ctx context.Context, portal Portal, conte
 	if call.State != database.StateRinging {
 		return nil
 	}
-	_ = content
+	// Only the fact of the join matters: the ghost's own RTC identity is
+	// derived from its MXID and the bridge's call ID, never from the joining
+	// client's membership.
 	s.signalAnswer(call.CallID)
 	return nil
 }
@@ -1017,7 +1017,7 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal) (*database.Call, er
 		return nil, fmt.Errorf("the SIP transport is not running")
 	}
 
-	intent, err := s.ghostFor(ctx, portalID)
+	intent, err := s.mx.GhostIntent(ctx, portalID)
 	if err != nil {
 		return nil, err
 	}
@@ -1102,7 +1102,7 @@ func (s *Subsystem) DialNumber(ctx context.Context, number string) (*database.Ca
 	if err != nil {
 		return nil, err
 	}
-	portal, err := s.portalForNumber(ctx, portalID)
+	portal, err := s.mx.PortalRoom(ctx, portalID)
 	if err != nil {
 		return nil, err
 	}

@@ -108,7 +108,7 @@ func (s *Subsystem) postCallRecord(ctx context.Context, call *database.Call, end
 	if call.RoomID == "" {
 		return
 	}
-	intent, err := s.ghostFor(ctx, call.PortalID)
+	intent, err := s.mx.GhostIntent(ctx, call.PortalID)
 	if err != nil {
 		s.log.Warn().Err(err).Str("call_id", call.CallID).
 			Msg("Could not record the call in the room")

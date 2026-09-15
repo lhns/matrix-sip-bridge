@@ -141,7 +141,7 @@ func TestDialFailsWhenTheGhostMembershipCannotBePublished(t *testing.T) {
 func TestMatrixCallButtonLooksUpTheCallOnce(t *testing.T) {
 	h := newHarness(t)
 
-	if err := h.onMatrixJoinedCall(t.Context(), h.mx.portal, nil, zerolog.Nop()); err != nil {
+	if err := h.onMatrixJoinedCall(t.Context(), h.mx.portal, zerolog.Nop()); err != nil {
 		t.Fatalf("onMatrixJoinedCall: %v", err)
 	}
 	if len(h.sip.invites) != 1 {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"maunium.net/go/mautrix/event"
@@ -145,7 +144,7 @@ func (s *Subsystem) retractRingNotification(ctx context.Context, call *database.
 	if len(notifies) == 0 {
 		return
 	}
-	intent, err := s.ghostFor(ctx, call.PortalID)
+	intent, err := s.mx.GhostIntent(ctx, call.PortalID)
 	if err != nil {
 		s.log.Warn().Err(err).Str("call_id", call.CallID).
 			Msg("Could not retract the ring notification; clients will ring until it lapses")
@@ -163,7 +162,7 @@ func (s *Subsystem) retractRingNotification(ctx context.Context, call *database.
 // retractGhostMembership publishes the empty content that ends a membership.
 // Matrix has no state deletion, so leaving is an empty state event.
 func (s *Subsystem) retractGhostMembership(ctx context.Context, call *database.Call) error {
-	intent, err := s.ghostFor(ctx, call.PortalID)
+	intent, err := s.mx.GhostIntent(ctx, call.PortalID)
 	if err != nil {
 		return err
 	}
@@ -219,12 +218,10 @@ func rtcStateKey(userID id.UserID, deviceID, slot string, owned bool) string {
 	return "_" + key
 }
 
-// roomVersions caches m.room.create lookups; the version of a room never
-// changes, and an upgraded room is a different room.
-var roomVersions sync.Map // id.RoomID -> bool
-
 func (s *Subsystem) ownedStateKeys(ctx context.Context, intent GhostIntent, roomID id.RoomID) bool {
-	if cached, ok := roomVersions.Load(roomID); ok {
+	// The version of a room never changes, and an upgraded room is a
+	// different room, so the answer is cached for the subsystem's life.
+	if cached, ok := s.roomVersions.Load(roomID); ok {
 		return cached.(bool)
 	}
 	owned := false
@@ -239,7 +236,7 @@ func (s *Subsystem) ownedStateKeys(ctx context.Context, intent GhostIntent, room
 			}
 		}
 	}
-	roomVersions.Store(roomID, owned)
+	s.roomVersions.Store(roomID, owned)
 	return owned
 }
 
@@ -311,13 +308,6 @@ func leaveMembership() *event.Content {
 	return &event.Content{Raw: map[string]any{}}
 }
 
-// encryptedRooms remembers the answer for a room, encrypted or not. Caching
-// only the encrypted case left the common one re-reading m.room.encryption
-// from the homeserver on every call. A room's encryption cannot be turned off
-// again, so a cached "not encrypted" is only ever stale in the direction that
-// costs the warning, not the call.
-var encryptedRooms sync.Map // id.RoomID -> bool
-
 // warnIfEncrypted reports a portal room that will connect a call and then
 // carry no audible sound.
 //
@@ -328,7 +318,12 @@ var encryptedRooms sync.Map // id.RoomID -> bool
 // looks connected on both sides and is silent, with no error anywhere. Portal
 // rooms must therefore stay unencrypted.
 func (s *Subsystem) warnIfEncrypted(ctx context.Context, intent GhostIntent, roomID id.RoomID) {
-	if _, done := encryptedRooms.Load(roomID); done {
+	// Both answers are cached, not just the positive one: caching only the
+	// encrypted case left the common one re-reading m.room.encryption on
+	// every call. A room's encryption cannot be turned off again, so a
+	// cached "not encrypted" is only ever stale in the direction that costs
+	// the warning, not the call.
+	if _, done := s.encryptedRooms.Load(roomID); done {
 		return
 	}
 	reader, ok := intent.(roomStateReader)
@@ -341,10 +336,10 @@ func (s *Subsystem) warnIfEncrypted(ctx context.Context, intent GhostIntent, roo
 		return
 	}
 	if evt == nil {
-		encryptedRooms.Store(roomID, false)
+		s.encryptedRooms.Store(roomID, false)
 		return
 	}
-	encryptedRooms.Store(roomID, true)
+	s.encryptedRooms.Store(roomID, true)
 	s.log.Error().Stringer("room_id", roomID).
 		Msg("Portal room is encrypted; Element Call will expect SFrame media and this call will be silent")
 }

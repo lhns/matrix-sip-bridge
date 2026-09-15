@@ -70,24 +70,25 @@ type CallMembership struct {
 	MembershipID string `json:"membershipID,omitempty"`
 }
 
-// ParseCallMember decodes a call.member state event.
+// ParseCallMember reports whether a call.member state event describes an
+// active membership, which is the only thing the bridge acts on: the ghost's
+// own RTC identity is derived from its MXID and the bridge's call ID, so
+// nothing in the joining client's content is read.
 //
 // An empty content object is how a client leaves the session: Matrix has no
-// state deletion, so the redaction-equivalent is state with no fields. The
-// second return value reports whether the event describes an active
-// membership, which is the signal the bridge acts on.
+// state deletion, so the redaction-equivalent is state with no fields.
 //
 // origin is the event's own timestamp, needed because "expires" is measured
 // from when the membership was created and clients do not all send created_ts.
-func ParseCallMember(raw json.RawMessage, origin time.Time) (*CallMemberContent, bool, error) {
-	var c CallMemberContent
+func ParseCallMember(raw json.RawMessage, origin time.Time) (bool, error) {
 	if len(raw) == 0 {
-		return &c, false, nil
+		return false, nil
 	}
+	var c CallMemberContent
 	if err := json.Unmarshal(raw, &c); err != nil {
-		return nil, false, err
+		return false, err
 	}
-	return &c, c.IsActive(time.Now(), origin), nil
+	return c.IsActive(time.Now(), origin), nil
 }
 
 // IsActive reports whether the content describes a live membership.
@@ -134,32 +135,4 @@ func expired(createdTS, expiresMS int64, now, origin time.Time) bool {
 		return false
 	}
 	return base.Add(time.Duration(expiresMS) * time.Millisecond).Before(now)
-}
-
-// FirstDeviceID returns the device ID of the membership, from whichever of the
-// two content shapes carries it.
-func (c *CallMemberContent) FirstDeviceID() string {
-	if c.DeviceID != "" {
-		return c.DeviceID
-	}
-	for _, m := range c.Memberships {
-		if m.DeviceID != "" {
-			return m.DeviceID
-		}
-	}
-	return ""
-}
-
-// FirstMembershipID returns the MatrixRTC member ID, which together with the
-// user ID and device ID derives the LiveKit participant identity.
-func (c *CallMemberContent) FirstMembershipID() string {
-	if c.MembershipID != "" {
-		return c.MembershipID
-	}
-	for _, m := range c.Memberships {
-		if m.MembershipID != "" {
-			return m.MembershipID
-		}
-	}
-	return ""
 }
