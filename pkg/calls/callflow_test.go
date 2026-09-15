@@ -42,8 +42,7 @@ func TestRingingPrecedesThePortalAndTheDatabase(t *testing.T) {
 // later call from the same number. Both have to be undone.
 func TestLiveKitFailingAfterTheRingRetractsItAndEndsTheCall(t *testing.T) {
 	h := newHarness(t)
-	h.lk.status["CreateSIPParticipant"] = http.StatusInternalServerError
-	h.lk.reply["CreateSIPParticipant"] = `{"code":"internal","msg":"no trunk"}`
+	h.lk.stageError("CreateSIPParticipant", http.StatusInternalServerError, `{"code":"internal","msg":"no trunk"}`)
 
 	leg := newFakeInboundLeg()
 	h.HandleInboundCall(t.Context(), leg)
@@ -77,7 +76,7 @@ func TestACallShorterThanThePollIntervalStillEnds(t *testing.T) {
 	}
 
 	// The very first tick, with the caller already gone.
-	h.lk.reply["ListParticipants"] = `{"participants":[]}`
+	h.lk.stage("ListParticipants", `{"participants":[]}`)
 	h.checkParticipants(t.Context())
 
 	if got := h.activeCall(t); got != nil {

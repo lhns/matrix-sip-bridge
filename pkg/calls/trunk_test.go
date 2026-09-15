@@ -42,8 +42,8 @@ func listReply(t *testing.T, trunk *SIPOutboundTrunk) string {
 
 func TestReconcileTrunkCreatesMissingTrunk(t *testing.T) {
 	f := newFakeLiveKit(t)
-	f.reply["ListSIPOutboundTrunk"] = `{"items":[]}`
-	f.reply["CreateSIPOutboundTrunk"] = `{"sip_trunk_id":"ST_created","name":"` + testTrunkName + `"}`
+	f.stage("ListSIPOutboundTrunk", `{"items":[]}`)
+	f.stage("CreateSIPOutboundTrunk", `{"sip_trunk_id":"ST_created","name":"`+testTrunkName+`"}`)
 
 	s := trunkSubsystem(f, zerolog.Nop())
 	if err := s.reconcileTrunk(t.Context()); err != nil {
@@ -59,14 +59,14 @@ func TestReconcileTrunkCreatesMissingTrunk(t *testing.T) {
 
 func TestReconcileTrunkLeavesMatchingTrunkAlone(t *testing.T) {
 	f := newFakeLiveKit(t)
-	f.reply["ListSIPOutboundTrunk"] = listReply(t, &SIPOutboundTrunk{
+	f.stage("ListSIPOutboundTrunk", listReply(t, &SIPOutboundTrunk{
 		SipTrunkID:   "ST_existing",
 		Name:         testTrunkName,
 		Address:      testTrunkAddress,
 		Numbers:      []string{testTrunkNumber},
 		AuthUsername: testTrunkUser,
 		AuthPassword: testTrunkPassword,
-	})
+	}))
 
 	s := trunkSubsystem(f, zerolog.Nop())
 	for range 3 {
@@ -88,13 +88,13 @@ func TestReconcileTrunkUpdatesDifferingTrunk(t *testing.T) {
 	f := newFakeLiveKit(t)
 	// The production failure: a trunk registered before the SIP credentials
 	// were configured, so every call is rejected for missing auth.
-	f.reply["ListSIPOutboundTrunk"] = listReply(t, &SIPOutboundTrunk{
+	f.stage("ListSIPOutboundTrunk", listReply(t, &SIPOutboundTrunk{
 		SipTrunkID: "ST_existing",
 		Name:       testTrunkName,
 		Address:    "old.example.com",
 		Numbers:    []string{testTrunkNumber},
-	})
-	f.reply["UpdateSIPOutboundTrunk"] = `{"sip_trunk_id":"ST_existing","name":"` + testTrunkName + `"}`
+	}))
+	f.stage("UpdateSIPOutboundTrunk", `{"sip_trunk_id":"ST_existing","name":"`+testTrunkName+`"}`)
 
 	var logs bytes.Buffer
 	s := trunkSubsystem(f, zerolog.New(&logs))
@@ -138,14 +138,14 @@ func TestReconcileTrunkUpdatesDifferingTrunk(t *testing.T) {
 // show a diff no write can close, rewriting the trunk on every tick.
 func TestReconcileTrunkDoesNotRewriteWhenPasswordIsWithheld(t *testing.T) {
 	f := newFakeLiveKit(t)
-	f.reply["ListSIPOutboundTrunk"] = listReply(t, &SIPOutboundTrunk{
+	f.stage("ListSIPOutboundTrunk", listReply(t, &SIPOutboundTrunk{
 		SipTrunkID:   "ST_existing",
 		Name:         testTrunkName,
 		Address:      testTrunkAddress,
 		Numbers:      []string{testTrunkNumber},
 		AuthUsername: testTrunkUser,
-	})
-	f.reply["UpdateSIPOutboundTrunk"] = `{"sip_trunk_id":"ST_existing","name":"` + testTrunkName + `"}`
+	}))
+	f.stage("UpdateSIPOutboundTrunk", `{"sip_trunk_id":"ST_existing","name":"`+testTrunkName+`"}`)
 
 	s := trunkSubsystem(f, zerolog.Nop())
 	for range 4 {
@@ -169,9 +169,8 @@ func TestReconcileTrunkDoesNotRewriteWhenPasswordIsWithheld(t *testing.T) {
 // outcome so the bridge state can follow it.
 func TestTheTrunkReconcilerReportsEveryOutcome(t *testing.T) {
 	f := newFakeLiveKit(t)
-	f.status["ListSIPOutboundTrunk"] = http.StatusInternalServerError
-	f.reply["ListSIPOutboundTrunk"] = `{"code":"internal","msg":"redis is gone"}`
-	f.reply["CreateSIPOutboundTrunk"] = `{"sip_trunk_id":"ST_created","name":"` + testTrunkName + `"}`
+	f.stageError("ListSIPOutboundTrunk", http.StatusInternalServerError, `{"code":"internal","msg":"redis is gone"}`)
+	f.stage("CreateSIPOutboundTrunk", `{"sip_trunk_id":"ST_created","name":"`+testTrunkName+`"}`)
 
 	s := trunkSubsystem(f, zerolog.Nop())
 	var reported []error
@@ -182,8 +181,8 @@ func TestTheTrunkReconcilerReportsEveryOutcome(t *testing.T) {
 		t.Fatalf("a LiveKit that is down reported %v, want one failure", reported)
 	}
 
-	delete(f.status, "ListSIPOutboundTrunk")
-	f.reply["ListSIPOutboundTrunk"] = `{"items":[]}`
+	f.clearError("ListSIPOutboundTrunk")
+	f.stage("ListSIPOutboundTrunk", `{"items":[]}`)
 	s.reconcileAndReport(t.Context())
 	if len(reported) != 2 || reported[1] != nil {
 		t.Fatalf("a recreated trunk reported %v, want the recovery too", reported)
