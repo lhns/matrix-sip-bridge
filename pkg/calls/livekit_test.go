@@ -25,8 +25,10 @@ const testAPISecret = "secret-for-tests-only-0123456789"
 type fakeLiveKit struct {
 	*httptest.Server
 
-	// reply overrides the canned response body for a twirp method.
-	reply map[string]string
+	// reply overrides the canned response body for a twirp method, and status
+	// the HTTP status it comes back with, so a twirp error can be staged.
+	reply  map[string]string
+	status map[string]int
 
 	mu      sync.Mutex
 	methods []string
@@ -38,6 +40,7 @@ func newFakeLiveKit(t *testing.T) *fakeLiveKit {
 	t.Helper()
 	f := &fakeLiveKit{
 		reply:  map[string]string{},
+		status: map[string]int{},
 		bodies: map[string]json.RawMessage{},
 		claims: map[string]*tokenClaims{},
 	}
@@ -62,6 +65,9 @@ func newFakeLiveKit(t *testing.T) *fakeLiveKit {
 		f.mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
+		if code, ok := f.status[method]; ok {
+			w.WriteHeader(code)
+		}
 		if body, ok := f.reply[method]; ok {
 			_, _ = w.Write([]byte(body))
 			return
@@ -196,4 +202,58 @@ func testDatabase(t *testing.T) *database.Database {
 		t.Fatalf("upgrade: %v", err)
 	}
 	return db
+}
+
+// The participant watcher is the only signal the bridge has that a call ended,
+// and an error from it is retried for as long as the call row lives. A room
+// LiveKit no longer has is not an error to retry: nobody is in it.
+func TestParticipantPresentOnARoomThatIsGone(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		present bool
+		wantErr bool
+	}{
+		{
+			// What livekit-server 1.13 with the redis store actually answers.
+			name: "an unknown room lists nobody",
+			body: `{"participants":[]}`,
+		},
+		{
+			name:   "an unknown room reported as twirp not_found",
+			status: http.StatusNotFound,
+			body:   `{"code":"not_found","msg":"room not found"}`,
+		},
+		{
+			name:    "any other failure is still an error",
+			status:  http.StatusInternalServerError,
+			body:    `{"code":"internal","msg":"redis is down"}`,
+			wantErr: true,
+		},
+		{
+			name:    "the participant is in the room",
+			body:    `{"participants":[{"identity":"identity"}]}`,
+			present: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakeLiveKit(t)
+			f.reply["ListParticipants"] = tt.body
+			if tt.status != 0 {
+				f.status["ListParticipants"] = tt.status
+			}
+			present, err := f.client().ParticipantPresent(t.Context(), "qKKEsmRoomName", "identity")
+			if tt.wantErr && err == nil {
+				t.Fatal("ParticipantPresent returned no error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("ParticipantPresent: %v", err)
+			}
+			if present != tt.present {
+				t.Errorf("present = %v, want %v", present, tt.present)
+			}
+		})
+	}
 }

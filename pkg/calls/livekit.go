@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -321,10 +322,17 @@ type listParticipantsResponse struct {
 // ParticipantPresent reports whether an identity is still in a LiveKit room.
 // It is the bridge's only liveness signal for a call in progress; see
 // Subsystem.runParticipantWatcher.
+//
+// A room the server no longer has holds nobody, and is reported as absence
+// rather than as an error: an error here is retried forever, which leaves the
+// call in progress and its number out of service until the membership expiry.
 func (c *LiveKitClient) ParticipantPresent(ctx context.Context, room, identity string) (bool, error) {
 	var resp listParticipantsResponse
 	g := grants{Video: &videoGrant{RoomAdmin: true, Room: room}}
 	if err := c.callService(ctx, roomService, "ListParticipants", g, &listParticipantsRequest{Room: room}, &resp); err != nil {
+		if isNotFound(err) {
+			return false, nil
+		}
 		return false, err
 	}
 	for _, p := range resp.Participants {
@@ -333,6 +341,18 @@ func (c *LiveKitClient) ParticipantPresent(ctx context.Context, room, identity s
 		}
 	}
 	return false, nil
+}
+
+// isNotFound reports the twirp code LiveKit uses for a room or participant it
+// does not have.
+//
+// livekit-server 1.13 with the redis store answers ListParticipants for an
+// unknown room with an empty list and no error, so this guards the versions
+// and deployments that report it as an error instead. Both mean the same
+// thing here.
+func isNotFound(err error) bool {
+	var te *twirpError
+	return errors.As(err, &te) && te.Code == "not_found"
 }
 
 type removeParticipantRequest struct {
