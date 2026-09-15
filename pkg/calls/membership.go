@@ -265,7 +265,11 @@ func leaveMembership() *event.Content {
 	return &event.Content{Raw: map[string]any{}}
 }
 
-// encryptedRooms remembers which rooms have already been complained about.
+// encryptedRooms remembers the answer for a room, encrypted or not. Caching
+// only the encrypted case left the common one re-reading m.room.encryption
+// from the homeserver on every call. A room's encryption cannot be turned off
+// again, so a cached "not encrypted" is only ever stale in the direction that
+// costs the warning, not the call.
 var encryptedRooms sync.Map // id.RoomID -> bool
 
 // warnIfEncrypted reports a portal room that will connect a call and then
@@ -286,7 +290,12 @@ func (s *Subsystem) warnIfEncrypted(ctx context.Context, ghost *bridgev2.Ghost, 
 		return
 	}
 	evt, err := reader.GetStateEvent(ctx, roomID, event.StateEncryption, "")
-	if err != nil || evt == nil {
+	if err != nil {
+		// A failed read says nothing about the room, so it is not cached.
+		return
+	}
+	if evt == nil {
+		encryptedRooms.Store(roomID, false)
 		return
 	}
 	encryptedRooms.Store(roomID, true)
