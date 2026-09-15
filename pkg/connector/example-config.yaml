@@ -76,6 +76,18 @@ calls:
     # is also the worst-case delay before a finished call is cleaned up.
     participant_poll_interval: 10s
 
+    # What the bridge says about itself. Every category is on by default; set
+    # one to false to keep it in the log only.
+    notices:
+        # The timeline record a finished call leaves behind: missed, declined,
+        # incoming or outgoing with its duration. It is a plain message, not a
+        # notice, because it is what gives the room an unread badge.
+        call_ended: true
+        # Fold a call the bridge could not carry into that same record, as
+        # "Call failed - no route". Without it a failed call is a phone that
+        # rang and then went silent with no explanation anywhere the user looks.
+        call_failed: true
+
     # How the caller ghost's LiveKit participant identity is derived. It must
     # match what the Element Call build your clients run derives for itself:
     #   user_device -- "<user id>:<device id>", used verbatim

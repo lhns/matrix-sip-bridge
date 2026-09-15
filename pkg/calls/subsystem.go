@@ -86,6 +86,10 @@ type Config struct {
 	// participant is still in the room. That is the only signal the bridge has
 	// that a call ended; see runParticipantWatcher.
 	ParticipantPollInterval time.Duration `yaml:"participant_poll_interval"`
+
+	// Notices switches off a category of report that turns out to be noisy.
+	// Everything in it is on by default.
+	Notices NoticeConfig `yaml:"notices"`
 }
 
 // Subsystem bridges calls. It is deliberately not a bridgev2 concept: bridgev2
@@ -307,7 +311,7 @@ func (s *Subsystem) HandleInboundCall(ctx context.Context, leg InboundLeg) {
 	if err := s.bridgeMedia(ctx, call); err != nil {
 		log.Err(err).Msg("Failed to put the call into LiveKit")
 		_ = leg.Reject(503, "Service Unavailable")
-		_ = s.endCall(ctx, call)
+		_ = s.failCall(ctx, call, mediaFailureReason(err))
 		return
 	}
 	s.waitForMatrix(ctx, call, leg, log, waiters)
@@ -374,7 +378,7 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, callID, portalID, conf
 	// every error path out of here.
 	defer func() {
 		if retErr != nil {
-			if err := s.endCall(context.WithoutCancel(ctx), call); err != nil {
+			if err := s.failCall(context.WithoutCancel(ctx), call, "could not connect"); err != nil {
 				s.log.Warn().Err(err).Str("call_id", call.CallID).
 					Msg("Failed to roll back a call that could not be set up")
 			}
@@ -418,7 +422,7 @@ func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg 
 		// 486 rather than 480: the difference is what the caller's network
 		// plays them, and a rejection is not an absence.
 		_ = leg.Reject(486, "Busy Here")
-		_ = s.endCall(ctx, call)
+		_ = s.declineCall(ctx, call)
 		return
 	case <-leg.Done():
 		log.Info().Msg("Caller hung up before Matrix answered")
@@ -435,7 +439,7 @@ func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg 
 		// endCall detaches the context it is given, so the teardown still
 		// runs. Returning without it left the row ringing and the ghost's
 		// membership pinned in the room.
-		_ = s.endCall(ctx, call)
+		_ = s.failCall(ctx, call, "the bridge restarted")
 		return
 	}
 
@@ -451,7 +455,7 @@ func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg 
 	cancelRecord()
 	if err != nil {
 		s.logSetupError(log, call, err, "Failed to record the answered call")
-		_ = s.endCall(ctx, call)
+		_ = s.failCall(ctx, call, "could not connect")
 		return
 	}
 	if !mine {
@@ -460,7 +464,7 @@ func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg 
 	}
 	if err := leg.Answer(); err != nil {
 		log.Err(err).Msg("Failed to answer the call")
-		_ = s.endCall(ctx, call)
+		_ = s.failCall(ctx, call, "could not connect")
 		return
 	}
 	log.Info().Msg("Call answered; the dialplan now moves the caller into the conference")
@@ -510,7 +514,7 @@ func (s *Subsystem) discardIfStale(ctx context.Context, call *database.Call, err
 	s.log.Warn().Str("call_id", call.CallID).Str("state", string(call.State)).
 		Time("updated_at", call.UpdatedAt).
 		Msg("Discarding a call that cannot still be in progress")
-	if err := s.endCall(ctx, call); err != nil {
+	if err := s.endCallAs(ctx, call, callEnd{Quiet: true}); err != nil {
 		return nil, err
 	}
 	return nil, nil
@@ -710,8 +714,26 @@ func (s *Subsystem) signalAnswer(callID string) {
 // on a cancelled context would leave the membership pinned in the room, which
 // is exactly the failure this function exists to prevent.
 func (s *Subsystem) endCall(ctx context.Context, call *database.Call) error {
+	return s.endCallAs(ctx, call, callEnd{})
+}
+
+// declineCall ends a call a Matrix user rejected, and failCall one the bridge
+// itself could not carry. Both differ from endCall only in what the room is
+// told; reason is the short half of "Call failed — ...".
+func (s *Subsystem) declineCall(ctx context.Context, call *database.Call) error {
+	return s.endCallAs(ctx, call, callEnd{Declined: true})
+}
+
+func (s *Subsystem) failCall(ctx context.Context, call *database.Call, reason string) error {
+	return s.endCallAs(ctx, call, callEnd{Failure: reason})
+}
+
+func (s *Subsystem) endCallAs(ctx context.Context, call *database.Call, end callEnd) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
+	// The row as it was before it ended: End overwrites UpdatedAt and State,
+	// which are what say whether the call was answered and for how long.
+	before := *call
 	// The compare-and-swap is the whole of the idempotence: a duplicate leave
 	// event, a ring timeout and a watcher tick can all reach here for the same
 	// call, and only the one that actually moved the row tears it down.
@@ -736,7 +758,11 @@ func (s *Subsystem) endCall(ctx context.Context, call *database.Call) error {
 			s.log.Debug().Err(err).Str("call_id", call.CallID).Msg("Control leg was already gone")
 		}
 	}
-	return s.retractGhostMembership(ctx, call)
+	err = s.retractGhostMembership(ctx, call)
+	// Last, because it is the only step nobody is waiting on: the phones have
+	// stopped ringing and the conference is down by here.
+	s.postCallRecord(ctx, &before, end)
+	return err
 }
 
 func (s *Subsystem) keepLeg(callID string, leg OutboundLeg) {
@@ -997,7 +1023,7 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal) (*database.Call, er
 	// would be answered into a conference with nobody in it and stay there
 	// until they hung up themselves.
 	if _, err := s.publishGhostMembership(ctx, intent, call); err != nil {
-		_ = s.endCall(ctx, call)
+		_ = s.failCall(ctx, call, "could not connect")
 		return nil, fmt.Errorf("publish ghost RTC membership: %w", err)
 	}
 
@@ -1009,7 +1035,7 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal) (*database.Call, er
 	leg, err := s.sip.Invite(inviteCtx, uri, conference)
 	stopInvite()
 	if err != nil {
-		_ = s.endCall(ctx, call)
+		_ = s.failCall(ctx, call, "no route")
 		return nil, fmt.Errorf("invite %s: %w", uri, err)
 	}
 	s.keepLeg(call.CallID, leg)
@@ -1021,7 +1047,7 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal) (*database.Call, er
 	// alone in a conference until the callee hangs up.
 	mine, err := s.db.Call.Transition(ctx, call, database.StateRinging, database.StateBridged)
 	if err != nil {
-		_ = s.endCall(ctx, call)
+		_ = s.failCall(ctx, call, "could not connect")
 		return nil, fmt.Errorf("record the answered call: %w", err)
 	}
 	if !mine {
@@ -1037,7 +1063,7 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal) (*database.Call, er
 	}
 
 	if err := s.bridgeMedia(ctx, call); err != nil {
-		_ = s.endCall(ctx, call)
+		_ = s.failCall(ctx, call, mediaFailureReason(err))
 		return nil, err
 	}
 	s.log.Info().

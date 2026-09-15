@@ -108,6 +108,18 @@ offer of PCMU and PCMA. The dialplan should read the header, dial the number
 into that conference, and hang the bridge's control leg up. That leg carries no
 media either.
 
+### What a call leaves behind
+
+Every call that ends puts one message in its portal, sent as the caller's
+ghost: `Missed call`, `Call declined`, `Incoming call - 1m 20s`,
+`Outgoing call - 1m 20s`, `Outgoing call - no answer`, or
+`Call failed - <reason>` when the bridge itself could not carry it. It is a
+plain message rather than a notice, because that is what gives the room an
+unread badge.
+
+The record is on by default and can be turned down to log-only under
+`calls.notices`; see the example config.
+
 ### Ending a call
 
 The bridge has no channel to hang up: its own leg is gone seconds into every
@@ -376,6 +388,8 @@ pkg/calls/                 the call subsystem, independent of bridgev2 plumbing
   membership.go              publishing the ghost RTC membership and the ring
   rtc.go                     MSC3401 call.member parsing
   notification.go            MSC4075 ring notification, MSC4310 decline
+  record.go                  the timeline record a finished call leaves behind
+  notices.go                 the config switches that quieten a report category
   identity.go                LiveKit room-name and participant-identity derivation
   livekit.go                 twirp JSON client for the LiveKit SIP and room APIs
   trunk.go                   outbound-trunk reconciliation (Redis loses it)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -146,12 +147,17 @@ func (s *Subsystem) runTrunkReconciler(ctx context.Context) {
 	}
 }
 
+// ErrNoTrunk is the one media failure with a cause worth telling the room
+// about: without a trunk no call can be routed at all, and it is what a
+// dropped Redis leaves behind.
+var ErrNoTrunk = errors.New("no LiveKit outbound trunk available yet")
+
 // currentTrunkID returns the cached trunk ID, or an error if the trunk has
 // never been successfully reconciled.
 func (s *Subsystem) currentTrunkID() (string, error) {
 	id := s.trunkID.Load()
 	if id == nil || *id == "" {
-		return "", fmt.Errorf("no LiveKit outbound trunk available yet")
+		return "", ErrNoTrunk
 	}
 	return *id, nil
 }
