@@ -75,7 +75,7 @@ What the bridge sends back, in order:
 | Status | When |
 | --- | --- |
 | `100 Trying` | immediately, from the transaction layer |
-| `180 Ringing` | as soon as the conference header has been accepted and the Matrix side has been rung |
+| `180 Ringing` | as soon as the conference header has been accepted, before the portal is looked up or created |
 | `200 OK` with SDP | **only** once a Matrix user has actually joined the RTC session |
 | `404 Not Found` | the conference header is missing, or does not carry the configured prefix |
 | `480 Temporarily Unavailable` | nobody joined within `calls.ring_timeout` (45s by default) |

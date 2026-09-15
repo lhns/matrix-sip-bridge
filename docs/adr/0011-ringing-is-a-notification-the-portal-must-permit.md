@@ -35,10 +35,11 @@ is a separate MSC4075 event, `m.rtc.notification`. The bridge sent none, so an
 inbound call sat in the room until `calls.ring_timeout` expired and was
 declined.
 
-The event is `notification_type: "ring"` with a `lifetime`, and it is retracted
-by nothing: there is no cancel event, and the bridgev2 Matrix API has no
-redaction. Its `lifetime` is therefore the only thing that stops a ring the
-callee never answered. MSC4310 adds the other direction, an
+The event is `notification_type: "ring"` with a `lifetime`. MSC4075 has no
+cancel event, so a call that ends before it is answered retracts the
+notification by redacting it, which the ghost may do to its own event; the
+`lifetime` is the backstop for a client that misses the redaction. MSC4310
+adds the other direction, an
 `org.matrix.msc4310.rtc.decline` referencing the notification by
 `m.reference`, which is what a client sends when the user rejects the call.
 
