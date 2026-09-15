@@ -140,6 +140,11 @@ type Subsystem struct {
 	// joined yet". Teardown depends on the difference.
 	seenMu sync.Mutex
 	seen   map[string]bool
+
+	// repaired names the portal rooms already known to carry the power levels
+	// a call needs, so reapplyChatInfo reads them once rather than on every
+	// call. A room never loses them again.
+	repaired sync.Map // id.RoomID -> struct{}
 }
 
 // New builds the subsystem. Start does the work.
@@ -762,10 +767,13 @@ func (s *Subsystem) portalForNumber(ctx context.Context, portalID string) (*brid
 //
 // bridgev2 applies the power level overrides while creating a room and never
 // revisits them, so without this an older portal would stay uncallable
-// forever. It runs on every call, so it checks first and does nothing at all
-// in the normal case: re-sending room state each time is both a write against
-// the database for no reason and a change clients render.
+// forever. It runs on every call, so a room found to need nothing is
+// remembered: the check itself is a state read, and re-sending room state is
+// both a write against the database for no reason and a change clients render.
 func (s *Subsystem) reapplyChatInfo(ctx context.Context, portal *bridgev2.Portal, source *bridgev2.UserLogin) {
+	if _, done := s.repaired.Load(portal.MXID); done {
+		return
+	}
 	levels, err := s.br.Matrix.GetPowerLevels(ctx, portal.MXID)
 	if err != nil {
 		s.log.Warn().Err(err).Str("portal_id", string(portal.ID)).
@@ -773,6 +781,7 @@ func (s *Subsystem) reapplyChatInfo(ctx context.Context, portal *bridgev2.Portal
 		return
 	}
 	if callPowerLevelsApplied(levels) {
+		s.repaired.Store(portal.MXID, struct{}{})
 		return
 	}
 	info, err := source.Client.GetChatInfo(ctx, portal)
