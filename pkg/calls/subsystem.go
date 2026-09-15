@@ -1054,15 +1054,13 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal) (*database.Call, er
 	if err := s.db.Call.Insert(ctx, call); err != nil {
 		return nil, fmt.Errorf("insert call: %w", err)
 	}
-	// The ghost membership goes out before the phone rings, so the Matrix side
-	// has something to join while it does.
-	// No ring notification for an outbound call: the Matrix side started it
-	// and is already in the session, so notifying it would ring the caller's
-	// own phone.
+	// The ghost membership goes out before the phone rings, and the call fails
+	// without it: it is what the Matrix side joins, so a callee answered into
+	// a conference that has no Matrix participant stays there until they hang
+	// up themselves.
 	//
-	// Without it there is nothing for the Matrix side to join, so the callee
-	// would be answered into a conference with nobody in it and stay there
-	// until they hung up themselves.
+	// No ring notification, though. The Matrix side started this call and is
+	// already in the session; notifying it would ring the caller's own phone.
 	if _, err := s.publishGhostMembership(ctx, intent, call); err != nil {
 		_ = s.failCall(ctx, call, "could not connect")
 		return nil, fmt.Errorf("publish ghost RTC membership: %w", err)
