@@ -13,14 +13,26 @@ import (
 	"github.com/lhns/matrix-sip-bridge/pkg/database"
 )
 
+// deviceIDLen is how much of the call ID the ghost's device ID carries. The
+// device ID only has to be stable and unique among the calls live in one room
+// at once, so it is shortened to stay readable in a state key.
+const deviceIDLen = 8
+
 // deviceIDFor is the device the ghost claims to be calling from.
 //
 // It is an invented string, not a Matrix device: matrix-js-sdk treats
 // member.device_id and member.id as opaque, hashes them together with the user
 // ID to derive the LiveKit identity, and never looks either of them up. No
 // device keys, no /devices registration, no cross-signing.
+//
+// A shorter call ID is used whole rather than sliced: this runs inside a
+// Matrix event handler, on an ID that came back from the database, and a panic
+// there would take down the handler for every later event too.
 func deviceIDFor(callID string) string {
-	return "SIP" + strings.ToUpper(callID[:8])
+	if len(callID) > deviceIDLen {
+		callID = callID[:deviceIDLen]
+	}
+	return "SIP" + strings.ToUpper(callID)
 }
 
 // callIdentity is the set of names one call's RTC membership and its LiveKit

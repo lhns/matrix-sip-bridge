@@ -202,3 +202,23 @@ func TestIdentityForIsSelfConsistent(t *testing.T) {
 		})
 	}
 }
+
+// deviceIDFor runs inside a Matrix event handler, on a call ID that came back
+// from the database rather than from newCallID. Slicing it took the handler
+// down for every later event as well.
+func TestDeviceIDForShortCallID(t *testing.T) {
+	tests := []struct {
+		callID string
+		want   string
+	}{
+		{"", "SIP"},
+		{"abc", "SIPABC"},
+		{"abcdefgh", "SIPABCDEFGH"},
+		{"abcdefghij", "SIPABCDEFGH"},
+	}
+	for _, tt := range tests {
+		if got := deviceIDFor(tt.callID); got != tt.want {
+			t.Errorf("deviceIDFor(%q) = %q, want %q", tt.callID, got, tt.want)
+		}
+	}
+}

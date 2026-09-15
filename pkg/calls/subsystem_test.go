@@ -77,8 +77,8 @@ func TestNewCallIDIsUniqueAndLongEnough(t *testing.T) {
 	seen := map[string]bool{}
 	for range 100 {
 		id := newCallID()
-		// deviceIDFor slices the first 8 characters for the device
-		// ID, so anything shorter would panic at runtime.
+		// The device ID is the first 8 characters, so a shorter call
+		// ID would make two live calls in one room collide.
 		if len(id) != 32 {
 			t.Fatalf("call ID %q has length %d, want 32", id, len(id))
 		}
