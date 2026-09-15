@@ -162,8 +162,8 @@ func (s *Subsystem) retractGhostMembership(ctx context.Context, call *database.C
 	return err
 }
 
-// sweepStaleMemberships retracts the memberships of calls that were in
-// progress when the bridge last stopped.
+// sweepStaleMemberships tears down the calls that were in progress when the
+// bridge last stopped.
 //
 // A membership is only ever retracted by this process, so a crash mid-call
 // leaves a phantom participant in the room's call UI. Rather than carry a
@@ -171,14 +171,20 @@ func (s *Subsystem) retractGhostMembership(ctx context.Context, call *database.C
 // takes to restart, the memberships are reconciled once at startup against
 // the call table, which after a restart lists exactly the calls that cannot
 // still be running.
+//
+// The LiveKit participant goes with the membership. Retracting only the Matrix
+// side left livekit-sip in the room and the caller in the conference with
+// nobody to talk to, which also blocks the next call to that number.
 func (s *Subsystem) sweepStaleMemberships(ctx context.Context, stale []*database.Call) {
 	for _, call := range stale {
+		log := s.log.With().Str("call_id", call.CallID).Logger()
+		s.removeParticipant(ctx, call, log)
 		if err := s.retractGhostMembership(ctx, call); err != nil {
-			s.log.Warn().Err(err).Str("call_id", call.CallID).
+			log.Warn().Err(err).
 				Msg("Failed to retract a membership left over from the last run")
 			continue
 		}
-		s.log.Info().Str("call_id", call.CallID).Stringer("room_id", call.RoomID).
+		log.Info().Stringer("room_id", call.RoomID).
 			Msg("Retracted an RTC membership left over from the last run")
 	}
 }
