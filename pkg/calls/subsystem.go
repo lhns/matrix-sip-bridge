@@ -39,6 +39,11 @@ type InboundLeg interface {
 	Reject(code int, reason string) error
 	// Done is closed when the leg is gone, by BYE, CANCEL or failure.
 	Done() <-chan struct{}
+	// Finished is Done as a question rather than a signal, and it is true
+	// before Done closes. A leg's death also cancels the context its call
+	// runs on, so a select woken by that cancellation cannot tell a hangup
+	// from a shutdown by looking at Done -- it may not be closed yet.
+	Finished() bool
 }
 
 // OutboundLeg is the control leg of a call the bridge asked the SIP server to
@@ -451,6 +456,12 @@ func (s *Subsystem) beginInboundCall(ctx context.Context, callID, portalID, conf
 func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg InboundLeg, log zerolog.Logger, w callWaiters) {
 	ring := time.NewTimer(s.cfg.RingTimeout)
 	defer ring.Stop()
+	// Two cases below reach this, and they must stay the same handling: the
+	// leg's own signal, and the context cancellation that beats it.
+	callerHungUp := func() {
+		log.Info().Msg("Caller hung up before Matrix answered")
+		_ = s.endCall(ctx, call)
+	}
 	select {
 	case <-w.joined:
 	case <-w.ended:
@@ -467,8 +478,7 @@ func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg 
 		_ = s.declineCall(ctx, call)
 		return
 	case <-leg.Done():
-		log.Info().Msg("Caller hung up before Matrix answered")
-		_ = s.endCall(ctx, call)
+		callerHungUp()
 		return
 	case <-ring.C:
 		log.Info().Msg("Nobody answered in Matrix, declining the call")
@@ -476,6 +486,16 @@ func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg 
 		_ = s.endCall(ctx, call)
 		return
 	case <-ctx.Done():
+		// A call runs on a context the leg cancels when it dies, so this
+		// case fires for a hangup as well as for a shutdown -- and it fires
+		// FIRST on a hangup, because the leg cancels before it closes Done.
+		// That made the leg.Done case above unreachable on a hangup and
+		// reported every caller who gave up as a bridge restart. Finished is
+		// true before either happens, so it separates the two definitively.
+		if leg.Finished() {
+			callerHungUp()
+			return
+		}
 		log.Info().Msg("The bridge is going away while the call rings, declining")
 		_ = leg.Reject(503, "Service Unavailable")
 		// endCall detaches the context it is given, so the teardown still

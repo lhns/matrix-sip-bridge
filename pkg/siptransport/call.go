@@ -48,6 +48,16 @@ func (c *InboundCall) Conference() string { return c.conference }
 // Done is closed when the leg is gone, by BYE, CANCEL or transaction failure.
 func (c *InboundCall) Done() <-chan struct{} { return c.done }
 
+// Finished reports whether the leg has begun releasing. It is true from the
+// moment finish() commits, which is strictly before the leg's context is
+// cancelled and before Done() closes, so a reader woken by that cancellation
+// can ask this and get a definite answer instead of racing dlg.Close().
+func (c *InboundCall) Finished() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
 // Ringing sends 180. It tells the SIP server the bridge is a live branch of
 // the Dial() without committing to answering.
 func (c *InboundCall) Ringing() error {

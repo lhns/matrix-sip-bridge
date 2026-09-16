@@ -343,6 +343,7 @@ type fakeInboundLeg struct {
 	mu        sync.Mutex
 	answered  int
 	rejects   []int
+	finished  bool
 	done      chan struct{}
 	closeOnce sync.Once
 }
@@ -355,7 +356,34 @@ func (l *fakeInboundLeg) From() string          { return "sip:caller@example.com
 func (l *fakeInboundLeg) Conference() string    { return "sip-15551234567" }
 func (l *fakeInboundLeg) Done() <-chan struct{} { return l.done }
 func (l *fakeInboundLeg) Ringing() error        { l.rec.add("180"); return nil }
-func (l *fakeInboundLeg) finish()               { l.closeOnce.Do(func() { close(l.done) }) }
+
+// finish marks the leg released before closing Done, in that order, because
+// that is the order the real leg uses and the order the ctx.Done case in
+// waitForMatrix depends on to tell a hangup from a shutdown.
+func (l *fakeInboundLeg) finish() {
+	l.closeOnce.Do(func() {
+		l.mu.Lock()
+		l.finished = true
+		l.mu.Unlock()
+		close(l.done)
+	})
+}
+
+// beginFinish is finish stopped halfway: released, but Done not yet closed.
+// The real leg is in exactly this state between cancelling its context and
+// closing Done, and it is the state a reader woken by that cancellation
+// actually observes.
+func (l *fakeInboundLeg) beginFinish() {
+	l.mu.Lock()
+	l.finished = true
+	l.mu.Unlock()
+}
+
+func (l *fakeInboundLeg) Finished() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.finished
+}
 
 func (l *fakeInboundLeg) Answer() error {
 	l.rec.add("200")

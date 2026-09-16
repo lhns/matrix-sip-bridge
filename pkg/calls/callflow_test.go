@@ -185,6 +185,44 @@ func TestAnsweringTheInstantTheNotificationArrives(t *testing.T) {
 	}
 }
 
+// A caller who gives up while Matrix is still ringing cancels the context the
+// call runs on, and cancels it BEFORE the leg's Done closes. That made the
+// ctx.Done case win every time and told the room the bridge had restarted --
+// for an ordinary unanswered call, on a bridge with days of uptime. The leg is
+// asked instead of the channel raced.
+func TestACallerHangingUpDuringTheRingIsAMissedCallNotAFailure(t *testing.T) {
+	h := newHarness(t)
+	call := h.insertRinging(t)
+	h.rememberNotification("$ring", call.CallID)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	waiters := h.waitersFor(call.CallID)
+	defer h.forgetWaiters(call.CallID)
+	leg := newFakeInboundLeg()
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		// The real teardown order: the leg commits to releasing, cancels the
+		// call's context, and only then closes Done. Reproducing it here is
+		// the whole point -- with Done already closed the select could pass
+		// by luck.
+		leg.beginFinish()
+		cancel()
+	}()
+	h.waitForMatrix(ctx, call, leg, zerolog.Nop(), waiters)
+
+	if got := h.intent.bodies(); len(got) != 1 || got[0] != "Missed call" {
+		t.Errorf("the room was told %v, want one \"Missed call\"", got)
+	}
+	if _, rejects := leg.state(); len(rejects) != 0 {
+		t.Errorf("the leg was rejected with %v, want no rejection -- the caller is already gone", rejects)
+	}
+	if got := h.activeCall(t); got != nil {
+		t.Fatalf("call %s is still %q after the caller hung up", got.CallID, got.State)
+	}
+}
+
 // Returning from the ring without ending the call left the row ringing and the
 // ghost's membership pinned in the room, which blocks every later call to the
 // number until the row goes stale.
