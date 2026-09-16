@@ -6,9 +6,25 @@ import (
 	"strings"
 
 	"github.com/emiago/sipgo/sip"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
 )
+
+// sanitiseCaller reduces an MXID to what is safe in a quoted SIP display name.
+// An MXID cannot contain a quote, a backslash or a newline, so anything that
+// does is not one and is dropped whole rather than escaped: a display name is
+// a claim the far end may act on, and a half-repaired one is worse than none.
+func sanitiseCaller(u id.UserID) string {
+	s := string(u)
+	if s == "" || len(s) > 255 {
+		return ""
+	}
+	if strings.ContainsAny(s, "\"\\\r\n") {
+		return ""
+	}
+	return s
+}
 
 // contentTypeText is the only body chan_sip's ast_msg_tech accepts. Anything
 // else is answered 415 there, so the bridge refuses it symmetrically rather
@@ -58,21 +74,34 @@ func (t *Transport) handleMessage(req *sip.Request, tx sip.ServerTransaction) {
 //
 // to and from are SIP URIs. The body must be text/plain; chan_sip answers
 // anything else 415.
-func (t *Transport) SendMessage(ctx context.Context, to, from, body string) error {
+//
+// caller is the Matrix user who sent it, carried in the From DISPLAY NAME
+// rather than a header: the SIP server matches this peer on the From user part,
+// so that half is not ours to use, while the display name is free and every
+// dialplan already strips it. It also rides an out-of-call MESSAGE, which a
+// custom header is not guaranteed to on every SIP stack.
+func (t *Transport) SendMessage(ctx context.Context, to, from, body string, caller id.UserID) error {
 	var recipient sip.Uri
 	if err := sip.ParseUri(to, &recipient); err != nil {
 		return fmt.Errorf("parse destination %q: %w", to, err)
 	}
 	req := sip.NewRequest(sip.MESSAGE, recipient)
+	var fromHeader *sip.FromHeader
 	if from != "" {
 		var fromURI sip.Uri
 		if err := sip.ParseUri(from, &fromURI); err != nil {
 			return fmt.Errorf("parse sender %q: %w", from, err)
 		}
-		req.AppendHeader(&sip.FromHeader{Address: fromURI, Params: sip.NewParams()})
+		fromHeader = &sip.FromHeader{Address: fromURI, Params: sip.NewParams()}
 	} else {
-		req.AppendHeader(t.fromHeader())
+		fromHeader = t.fromHeader()
 	}
+	// An MXID cannot contain a quote or a backslash, and sipgo does not escape
+	// either, so a sanitised one cannot break out of the quoted display name.
+	if c := sanitiseCaller(caller); c != "" {
+		fromHeader.DisplayName = c
+	}
+	req.AppendHeader(fromHeader)
 	req.AppendHeader(sip.NewHeader("Content-Type", contentTypeText))
 	req.AppendHeader(t.allow)
 	req.SetBody([]byte(body))

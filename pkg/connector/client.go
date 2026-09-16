@@ -197,7 +197,9 @@ func (sc *SIPClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	if sc.conn.sip == nil {
 		return nil, fmt.Errorf("the SIP endpoint is not running")
 	}
-	if err := sc.conn.sip.SendMessage(ctx, to, cfg.OutboundFrom, body); err != nil {
+	// msg.Event.Sender, not the login: relay swaps the UserLogin a message is sent
+	// through and leaves the event alone, so this is the real person in both modes.
+	if err := sc.conn.sip.SendMessage(ctx, to, cfg.OutboundFrom, body, msg.Event.Sender); err != nil {
 		return nil, err
 	}
 	// A 200 to a SIP MESSAGE carries no message identifier, so the bridge

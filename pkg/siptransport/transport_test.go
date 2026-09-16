@@ -17,6 +17,7 @@ import (
 	"github.com/icholy/digest"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
 )
@@ -455,6 +456,58 @@ func TestInboundMessageRejectsNonTextBodies(t *testing.T) {
 	}
 }
 
+// The SIP server decides who may send, and it can only do that if the bridge
+// says who is sending. The From USER PART is not available for it -- the server
+// matches this peer on it -- so the identity rides the display name.
+func TestTheSendingMatrixUserRidesTheFromDisplayName(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	peer := newFakePeer(t, ctx)
+	tr, _ := startBridge(t, ctx, nil)
+
+	to := "sip:15551234567@" + peer.addr
+	if err := tr.SendMessage(ctx, to, "sip:15559876543@example.com", "hi", "@alice:example.com"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	select {
+	case req := <-peer.messages:
+		from := req.From()
+		if from == nil || from.DisplayName != "@alice:example.com" {
+			t.Errorf("From display name = %v, want the sending MXID", from)
+		}
+		// The user part still has to be the peer name, or the server cannot
+		// match the request to this peer at all.
+		if from == nil || from.Address.User != "15559876543" {
+			t.Errorf("From user part = %v, want it untouched", from)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("the peer never saw the MESSAGE")
+	}
+}
+
+// A display name is a claim the far end may act on, so anything that is not an
+// MXID is dropped whole rather than escaped -- sipgo quotes it but does not
+// escape quotes or backslashes inside it.
+func TestACallerThatCannotBeADisplayNameIsDropped(t *testing.T) {
+	for _, tt := range []struct {
+		name, in, want string
+	}{
+		{"an ordinary mxid", "@alice:example.com", "@alice:example.com"},
+		{"empty", "", ""},
+		{"a quote would end the quoted string", `@a"b:example.com`, ""},
+		{"a backslash escapes the closing quote", `@a\b:example.com`, ""},
+		{"a newline would inject a header", "@a\nFrom: x", ""},
+		{"absurdly long", strings.Repeat("x", 256), ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sanitiseCaller(id.UserID(tt.in)); got != tt.want {
+				t.Errorf("sanitiseCaller(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestOutboundMessageReachesThePeer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -463,7 +516,7 @@ func TestOutboundMessageReachesThePeer(t *testing.T) {
 	tr, _ := startBridge(t, ctx, nil)
 
 	to := "sip:15551234567@" + peer.addr
-	if err := tr.SendMessage(ctx, to, "sip:15559876543@example.com", "hi there"); err != nil {
+	if err := tr.SendMessage(ctx, to, "sip:15559876543@example.com", "hi there", ""); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	select {
@@ -492,7 +545,7 @@ func TestOutboundMessageRefusesOversizedBodies(t *testing.T) {
 	tr, _ := startBridge(t, ctx, nil)
 
 	err := tr.SendMessage(ctx, "sip:15551234567@"+peer.addr, "sip:15559876543@example.com",
-		strings.Repeat("x", maxPacketSize))
+		strings.Repeat("x", maxPacketSize), "")
 	if err == nil {
 		t.Fatal("expected an oversized message to be refused")
 	}
@@ -790,7 +843,7 @@ func TestOutboundMessageAnswersADigestChallenge(t *testing.T) {
 	peer.requireAuth.Store(true)
 	tr, _ := startBridge(t, ctx, func(c *Config) { c.Register.Password = testSIPPassword })
 
-	err := tr.SendMessage(ctx, "sip:15551234567@"+peer.addr, "sip:15559876543@example.com", "hi there")
+	err := tr.SendMessage(ctx, "sip:15551234567@"+peer.addr, "sip:15559876543@example.com", "hi there", "")
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
@@ -820,7 +873,7 @@ func TestChallengeWithoutAPasswordNamesTheSetting(t *testing.T) {
 	peer.requireAuth.Store(true)
 	tr, _ := startBridge(t, ctx, nil)
 
-	err := tr.SendMessage(ctx, "sip:15551234567@"+peer.addr, "sip:15559876543@example.com", "hi there")
+	err := tr.SendMessage(ctx, "sip:15551234567@"+peer.addr, "sip:15559876543@example.com", "hi there", "")
 	if err == nil {
 		t.Fatal("expected the unauthenticated MESSAGE to fail")
 	}
@@ -854,7 +907,7 @@ func TestOutboundRequestsAreFromTheConfiguredUsername(t *testing.T) {
 		t.Fatal("peer never received the INVITE")
 	}
 
-	if err := tr.SendMessage(ctx, "sip:15551234567@"+peer.addr, "", "hi there"); err != nil {
+	if err := tr.SendMessage(ctx, "sip:15551234567@"+peer.addr, "", "hi there", ""); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	select {
@@ -904,7 +957,7 @@ func TestOversizedOutboundMessagesAreCounted(t *testing.T) {
 	tr, _ := startBridgeWithMetrics(t, ctx, nil, rec)
 	peer := newFakePeer(t, ctx)
 	err := tr.SendMessage(ctx, "sip:15551234567@"+peer.addr, "sip:15559876543@example.com",
-		strings.Repeat("x", maxPacketSize))
+		strings.Repeat("x", maxPacketSize), "")
 	if err == nil {
 		t.Fatal("an oversized message was sent")
 	}
