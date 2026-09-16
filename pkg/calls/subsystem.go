@@ -58,7 +58,10 @@ type OutboundLeg interface {
 // Only outbound INVITE is needed here; inbound calls arrive through
 // HandleInboundCall, which the transport's INVITE handler calls.
 type Telephony interface {
-	Invite(ctx context.Context, to, conference string) (OutboundLeg, error)
+	// caller is the Matrix user who asked for the call, or "" where no user
+	// did. It is passed on for the SIP server to do as it likes with; nothing
+	// here reads it back.
+	Invite(ctx context.Context, to, conference string, caller id.UserID) (OutboundLeg, error)
 }
 
 // Config configures the call subsystem.
@@ -897,7 +900,7 @@ func (s *Subsystem) handleCallMember(ctx context.Context, evt *event.Event) {
 		s.onMatrixLeftCall(ctx, portal, log)
 		return
 	}
-	if err := s.onMatrixJoinedCall(ctx, portal, log); err != nil {
+	if err := s.onMatrixJoinedCall(ctx, portal, evt.Sender, log); err != nil {
 		// Giving up on a call while it rings is a user's decision, not a
 		// fault: logging it as an error trains the reader to skip the real
 		// ones.
@@ -941,7 +944,7 @@ func (s *Subsystem) handleRtcDecline(ctx context.Context, evt *event.Event) {
 // this state event: there is no Matrix event that says "dial the phone", so a
 // membership appearing in a portal room with no call in progress is read as a
 // request to place one.
-func (s *Subsystem) onMatrixJoinedCall(ctx context.Context, portal Portal, log zerolog.Logger) error {
+func (s *Subsystem) onMatrixJoinedCall(ctx context.Context, portal Portal, joiner id.UserID, log zerolog.Logger) error {
 	call, err := s.activeCallByPortal(ctx, portal.ID)
 	if err != nil {
 		return fmt.Errorf("look up call: %w", err)
@@ -949,7 +952,8 @@ func (s *Subsystem) onMatrixJoinedCall(ctx context.Context, portal Portal, log z
 	if call == nil {
 		log.Info().Msg("RTC membership in a portal with no call, dialling out")
 		// dial, not Dial: the lookup Dial would repeat is the one just made.
-		_, err = s.dial(ctx, portal)
+		// The joiner is the caller: nothing else in the room asked for this.
+		_, err = s.dial(ctx, portal, joiner)
 		return err
 	}
 	if call.State != database.StateRinging {
@@ -1034,8 +1038,8 @@ func (s *Subsystem) bridgeMedia(ctx context.Context, call *database.Call) error 
 }
 
 // Dial places an outbound call to the number a portal represents, unless one
-// is already in progress there.
-func (s *Subsystem) Dial(ctx context.Context, portal Portal) (*database.Call, error) {
+// is already in progress there. caller is the Matrix user who asked for it.
+func (s *Subsystem) Dial(ctx context.Context, portal Portal, caller id.UserID) (*database.Call, error) {
 	if !s.cfg.Enabled {
 		return nil, fmt.Errorf("call bridging is disabled")
 	}
@@ -1044,13 +1048,13 @@ func (s *Subsystem) Dial(ctx context.Context, portal Portal) (*database.Call, er
 	} else if existing != nil {
 		return existing, nil
 	}
-	return s.dial(ctx, portal)
+	return s.dial(ctx, portal, caller)
 }
 
 // dial places the call. The caller owns the check that the portal has no call
 // in progress; repeating it here cost a second identical query on the path the
 // Matrix call button takes.
-func (s *Subsystem) dial(ctx context.Context, portal Portal) (*database.Call, error) {
+func (s *Subsystem) dial(ctx context.Context, portal Portal, caller id.UserID) (*database.Call, error) {
 	if !s.cfg.Enabled {
 		return nil, fmt.Errorf("call bridging is disabled")
 	}
@@ -1101,7 +1105,7 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal) (*database.Call, er
 	// hanging up while it rings has to reach it through the context: that is
 	// what turns the hangup into a CANCEL.
 	inviteCtx, stopInvite := s.inviteContext(ctx, call.CallID)
-	leg, err := s.sip.Invite(inviteCtx, uri, conference)
+	leg, err := s.sip.Invite(inviteCtx, uri, conference, caller)
 	stopInvite()
 	if err != nil {
 		_ = s.failCall(ctx, call, "no route")
@@ -1144,8 +1148,9 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal) (*database.Call, er
 	return call, nil
 }
 
-// DialNumber resolves a number to its portal and calls it.
-func (s *Subsystem) DialNumber(ctx context.Context, number string) (*database.Call, error) {
+// DialNumber resolves a number to its portal and calls it, on behalf of the
+// Matrix user who asked.
+func (s *Subsystem) DialNumber(ctx context.Context, number string, caller id.UserID) (*database.Call, error) {
 	portalID, err := phonenum.NormalizeToID(number)
 	if err != nil {
 		return nil, err
@@ -1154,7 +1159,7 @@ func (s *Subsystem) DialNumber(ctx context.Context, number string) (*database.Ca
 	if err != nil {
 		return nil, err
 	}
-	return s.Dial(ctx, portal)
+	return s.Dial(ctx, portal, caller)
 }
 
 // runParticipantWatcher is how the bridge learns that a call has ended.

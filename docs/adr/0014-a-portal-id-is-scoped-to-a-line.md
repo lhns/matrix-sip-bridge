@@ -75,3 +75,9 @@ be trusted to remember.
 - An inbound SIP MESSAGE still keys its portal on the sender's number alone
   (ADR-0003's form). Text has no line in the protocol the way a call has a
   conference header.
+- The bridge names the Matrix user who placed an outbound call, in the header
+  `sip.caller_header` (empty by default, which sends nothing). That is identity,
+  not routing: the bridge still does not know what a line is, which trunk it
+  gets, or that the server has a permission table at all. It reports who asked
+  and the server decides — which is the same split as the conference name, where
+  the bridge says which conversation and the dialplan says which trunk.

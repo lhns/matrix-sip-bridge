@@ -55,6 +55,7 @@ func upgradeConfig(helper configupgrade.Helper) {
 	helper.Copy(configupgrade.Str, "sip", "media_address")
 	helper.Copy(configupgrade.Int, "sip", "media_port")
 	helper.Copy(configupgrade.Str, "sip", "conference_header")
+	helper.Copy(configupgrade.Str, "sip", "caller_header")
 	helper.Copy(configupgrade.Bool, "sip", "register", "enabled")
 	helper.Copy(configupgrade.Str, "sip", "register", "server")
 	helper.Copy(configupgrade.Str, "sip", "register", "password")

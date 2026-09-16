@@ -36,7 +36,7 @@ func (sc *SIPConnector) dialCommand() *commands.FullHandler {
 				ce.Reply("That is not a usable number: %v", err)
 				return
 			}
-			call, err := sc.calls.DialNumber(ce.Ctx, number)
+			call, err := sc.calls.DialNumber(ce.Ctx, number, ce.User.MXID)
 			if err != nil {
 				ce.Reply("Failed to place the call: %v", err)
 				return

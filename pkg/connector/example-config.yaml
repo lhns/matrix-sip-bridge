@@ -28,6 +28,10 @@ sip:
     #   same => n,SIPAddHeader(X-Conference: sip-${EXTEN})
     conference_header: X-Conference
 
+    # Header carrying the Matrix user who placed an outbound call, so the SIP
+    # server can apply its own policy to them. Empty sends nothing.
+    caller_header: ""
+
     # Registration. A SIP server that has the bridge as a static peer needs
     # none, which is the simpler deployment.
     register:

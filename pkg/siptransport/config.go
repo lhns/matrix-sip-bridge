@@ -41,6 +41,16 @@ type Config struct {
 	// ConferenceHeader names the header the dialplan puts the conference name
 	// in, e.g. SIPAddHeader(X-Conference: sip-15551234567).
 	ConferenceHeader string `yaml:"conference_header"`
+
+	// CallerHeader names the header carrying the Matrix user who placed an
+	// outbound call, e.g. X-Matrix-Caller: @alice:example.com. It is identity
+	// and nothing else: what the SIP server does with it -- route on it,
+	// refuse it, ignore it -- is the server's policy, which this bridge does
+	// not model. See ADR-0014.
+	//
+	// Empty by default, and empty sends no header, so a server that does not
+	// want one is unaffected and this is its own kill switch.
+	CallerHeader string `yaml:"caller_header"`
 }
 
 // RegisterConfig is the bridge's registration with the SIP server.

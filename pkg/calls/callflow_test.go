@@ -120,7 +120,7 @@ func TestDialFailsWhenTheGhostMembershipCannotBePublished(t *testing.T) {
 	h := newHarness(t)
 	h.intent.stateErr = errors.New("synapse said no")
 
-	if _, err := h.Dial(t.Context(), h.mx.portal); err == nil {
+	if _, err := h.Dial(t.Context(), h.mx.portal, testCaller); err == nil {
 		t.Fatal("Dial succeeded without a ghost membership")
 	}
 	if call := h.activeCall(t); call != nil {
@@ -129,11 +129,38 @@ func TestDialFailsWhenTheGhostMembershipCannotBePublished(t *testing.T) {
 	// The proof that it is not merely recorded as ended: the next call to the
 	// same number gets through.
 	h.intent.stateErr = nil
-	if _, err := h.Dial(t.Context(), h.mx.portal); err != nil {
+	if _, err := h.Dial(t.Context(), h.mx.portal, testCaller); err != nil {
 		t.Fatalf("the next call to the same number failed: %v", err)
 	}
 	if len(h.sip.invites) != 1 {
 		t.Errorf("the SIP transport saw %v, want one INVITE", h.sip.invites)
+	}
+}
+
+// The SIP server decides who may dial out, and it can only do that if the bridge
+// says who is asking. Every dial entry point had the Matrix user in hand and
+// dropped it on the floor, so every outbound call looked the same to the server.
+func TestTheDiallingMatrixUserReachesTheInvite(t *testing.T) {
+	h := newHarness(t)
+
+	if _, err := h.Dial(t.Context(), h.mx.portal, testCaller); err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	if got := h.sip.callers; len(got) != 1 || got[0] != testCaller {
+		t.Errorf("the INVITE was placed for %v, want [%s]", got, testCaller)
+	}
+}
+
+// The call button is the other entry point, and the joining user is the caller:
+// nothing else in the room asked for this call.
+func TestTheJoiningMatrixUserReachesTheInvite(t *testing.T) {
+	h := newHarness(t)
+
+	if err := h.onMatrixJoinedCall(t.Context(), h.mx.portal, testCaller, zerolog.Nop()); err != nil {
+		t.Fatalf("onMatrixJoinedCall: %v", err)
+	}
+	if got := h.sip.callers; len(got) != 1 || got[0] != testCaller {
+		t.Errorf("the INVITE was placed for %v, want [%s]", got, testCaller)
 	}
 }
 
@@ -143,7 +170,7 @@ func TestDialFailsWhenTheGhostMembershipCannotBePublished(t *testing.T) {
 func TestMatrixCallButtonLooksUpTheCallOnce(t *testing.T) {
 	h := newHarness(t)
 
-	if err := h.onMatrixJoinedCall(t.Context(), h.mx.portal, zerolog.Nop()); err != nil {
+	if err := h.onMatrixJoinedCall(t.Context(), h.mx.portal, testCaller, zerolog.Nop()); err != nil {
 		t.Fatalf("onMatrixJoinedCall: %v", err)
 	}
 	if len(h.sip.invites) != 1 {
@@ -297,7 +324,7 @@ func TestOutboundCallFromALinePortalDialsTheBareNumber(t *testing.T) {
 			h := newHarness(t)
 			h.mx.portal = Portal{ID: tt.portalID, MXID: "!portal:example.com"}
 
-			call, err := h.Dial(t.Context(), h.mx.portal)
+			call, err := h.Dial(t.Context(), h.mx.portal, testCaller)
 			if err != nil {
 				t.Fatalf("Dial: %v", err)
 			}

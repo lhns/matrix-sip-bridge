@@ -210,18 +210,27 @@ func (l *fakeOutboundLeg) Hangup(context.Context) error {
 	return nil
 }
 
+// testCaller is the Matrix user the harness dials as. Real, because "" is the
+// no-user case and has its own meaning on the wire.
+const testCaller = id.UserID("@alice:example.com")
+
 // fakeTelephony is the SIP transport. Invite answers immediately, as a callee
 // picking up does.
 type fakeTelephony struct {
 	mu      sync.Mutex
 	invites []string
+	// callers records the Matrix user each invite was placed for, so a test can
+	// assert the identity survived the whole dial chain rather than only that a
+	// call went out.
+	callers []id.UserID
 	leg     *fakeOutboundLeg
 	err     error
 }
 
-func (f *fakeTelephony) Invite(ctx context.Context, to, _ string) (OutboundLeg, error) {
+func (f *fakeTelephony) Invite(ctx context.Context, to, _ string, caller id.UserID) (OutboundLeg, error) {
 	f.mu.Lock()
 	f.invites = append(f.invites, to)
+	f.callers = append(f.callers, caller)
 	err, leg := f.err, f.leg
 	f.mu.Unlock()
 	if err != nil {

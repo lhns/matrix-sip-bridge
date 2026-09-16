@@ -15,6 +15,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/calls"
 	sipdb "github.com/lhns/matrix-sip-bridge/pkg/database"
@@ -80,7 +81,7 @@ func (sc *SIPConnector) Start(ctx context.Context) error {
 	sc.sip = sip
 	sc.calls = calls.New(
 		sc.Config.Calls, sc.br, networkid.UserLoginID(LoginID),
-		sipTelephony{sip, sc.Config.SIP.ConferenceHeader}, sc.db,
+		sipTelephony{sip, sc.Config.SIP.ConferenceHeader, sc.Config.SIP.CallerHeader}, sc.db,
 		sc.br.Log.With().Str("component", "calls").Logger(), sc.metrics,
 	)
 
@@ -163,15 +164,22 @@ func (sc *SIPConnector) sipReady() bool {
 }
 
 // sipTelephony adapts the transport to the narrow interface the call subsystem
-// takes, and owns the one SIP detail that subsystem should not: the name of
-// the header carrying the conference.
+// takes, and owns the SIP details that subsystem should not: the names of the
+// headers carrying the conference and the caller.
 type sipTelephony struct {
 	transport        *siptransport.Transport
 	conferenceHeader string
+	callerHeader     string
 }
 
-func (s sipTelephony) Invite(ctx context.Context, to, conference string) (calls.OutboundLeg, error) {
-	return s.transport.Invite(ctx, to, map[string]string{s.conferenceHeader: conference})
+func (s sipTelephony) Invite(ctx context.Context, to, conference string, caller id.UserID) (calls.OutboundLeg, error) {
+	headers := map[string]string{s.conferenceHeader: conference}
+	// Both halves have to be present: an unconfigured header name has nowhere
+	// to go, and a call with no Matrix user behind it has nothing to say.
+	if s.callerHeader != "" && caller != "" {
+		headers[s.callerHeader] = caller.String()
+	}
+	return s.transport.Invite(ctx, to, headers)
 }
 
 // warnAboutRelay checks the two settings without which the bridge appears to
