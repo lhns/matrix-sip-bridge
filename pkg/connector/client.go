@@ -87,9 +87,8 @@ func (sc *SIPClient) GetCapabilities(_ context.Context, _ *bridgev2.Portal) *eve
 
 // GetChatInfo describes a portal: the Matrix user and the one phone number.
 func (sc *SIPClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
-	number := phonenum.FromID(string(portal.ID))
 	return &bridgev2.ChatInfo{
-		Name: ptr.Ptr(number),
+		Name: ptr.Ptr(portalName(string(portal.ID))),
 		// A portal is one phone number and is inherently two-party. The room
 		// type is what puts is_direct on the invite and the room in the user's
 		// m.direct; a client that reads neither treats every call in it as a
@@ -120,12 +119,30 @@ func (sc *SIPClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (*b
 	}, nil
 }
 
+// portalName names the room after the number, and after the line too when the
+// portal ID carries one: the same person on two lines is two portal rooms, and
+// with only the number in the name they are indistinguishable in the room
+// list. The line is deliberately not in the ghost's display name -- a ghost is
+// the person, who is not per-line.
+func portalName(portalID string) string {
+	line, _ := phonenum.SplitID(portalID)
+	number := phonenum.NumberFromID(portalID)
+	if line == "" {
+		return number
+	}
+	return number + " (" + line + ")"
+}
+
 func (sc *SIPClient) GetUserInfo(_ context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
-	number := phonenum.FromID(string(ghost.ID))
-	return &bridgev2.UserInfo{
-		Identifiers: []string{"tel:" + number},
-		Name:        ptr.Ptr(number),
-	}, nil
+	number := phonenum.NumberFromID(string(ghost.ID))
+	info := &bridgev2.UserInfo{Name: ptr.Ptr(number)}
+	// A "tel:" URI is a global number. A short number that only means
+	// something on its own line is not one, and publishing it as such offers
+	// every client a dial link to somewhere else entirely.
+	if phonenum.IsE164(number) {
+		info.Identifiers = []string{"tel:" + number}
+	}
+	return info, nil
 }
 
 // ResolveIdentifier turns a typed phone number into a ghost and a portal.
@@ -174,7 +191,7 @@ func (sc *SIPClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	if body == "" {
 		return nil, fmt.Errorf("only text messages can be sent as SIP MESSAGE")
 	}
-	number := phonenum.FromID(string(msg.Portal.ID))
+	number := phonenum.NumberFromID(string(msg.Portal.ID))
 	to := strings.ReplaceAll(cfg.OutboundTo, "{number}", number)
 
 	if sc.conn.sip == nil {

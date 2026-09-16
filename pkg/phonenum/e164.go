@@ -92,19 +92,14 @@ func stripURI(s string) string {
 
 // ToID strips the leading "+" to give the bare-digit form used as a portal ID,
 // a ghost user ID and the {{.}} of the appservice username_template.
+//
+// There is no unconditional inverse, and adding one back would reintroduce a
+// bug: "+" prepended to whatever a portal ID happens to contain turned a
+// composite ID into "+<line>-<digits>" and a short number into a country code
+// it does not have. NumberFromID knows which IDs are stripped E.164 and which
+// spell their own number.
 func ToID(e164 string) string {
 	return strings.TrimPrefix(e164, "+")
-}
-
-// FromID is the inverse of ToID.
-func FromID(id string) string {
-	if id == "" {
-		return ""
-	}
-	if strings.HasPrefix(id, "+") {
-		return id
-	}
-	return "+" + id
 }
 
 // NormalizeToID normalizes and converts to the ID form in one step.

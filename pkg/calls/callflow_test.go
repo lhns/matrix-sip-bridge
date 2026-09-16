@@ -2,9 +2,11 @@ package calls
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,5 +235,50 @@ func TestTheWatcherClearsARowLeftRinging(t *testing.T) {
 	}
 	if got := h.intent.redactions(); !slices.Contains(got, "$ring") {
 		t.Errorf("the call redacted %v, want the ring notification", got)
+	}
+}
+
+// The conference header namespaces a conversation by line, so a portal ID is
+// "<line>-<number>". Everything that dials, addresses or names the far end
+// wants the number half: putting the whole ID in the outbound URI produced
+// sip:+office-main-+15551234567@pbx, which the SIP server's route regex
+// refuses, so no call out of a portal created after lines arrived ever
+// connected.
+func TestOutboundCallFromALinePortalDialsTheBareNumber(t *testing.T) {
+	tests := []struct {
+		name     string
+		portalID string
+		want     string
+	}{
+		{"line and e164", "office-main-+15551234567", "sip:+15551234567@pbx.example.com"},
+		{"short number on a line", "office-1001", "sip:1001@pbx.example.com"},
+		{"legacy id from before lines", "15551234567", "sip:+15551234567@pbx.example.com"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.mx.portal = Portal{ID: tt.portalID, MXID: "!portal:example.com"}
+
+			call, err := h.Dial(t.Context(), h.mx.portal)
+			if err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+			if len(h.sip.invites) != 1 || h.sip.invites[0] != tt.want {
+				t.Fatalf("INVITE went to %v, want [%q]", h.sip.invites, tt.want)
+			}
+			// The conference, unlike the URI, keeps the whole portal ID: it is
+			// what an inbound call to the same line has to match.
+			if call.Conference != "sip-"+tt.portalID {
+				t.Errorf("conference = %q, want the portal ID kept whole", call.Conference)
+			}
+			var participant map[string]any
+			if err := json.Unmarshal(h.lk.bodies["CreateSIPParticipant"], &participant); err != nil {
+				t.Fatalf("participant body: %v", err)
+			}
+			wantName := strings.TrimSuffix(strings.TrimPrefix(tt.want, "sip:"), "@pbx.example.com")
+			if participant["participant_name"] != wantName {
+				t.Errorf("LiveKit participant name = %v, want %q", participant["participant_name"], wantName)
+			}
+		})
 	}
 }

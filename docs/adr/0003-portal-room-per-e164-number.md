@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Amended by [ADR-0014](0014-a-portal-id-is-scoped-to-a-line.md), which scopes
+the ID to a line and has the number carry its own `+`.
 
 ## Context
 

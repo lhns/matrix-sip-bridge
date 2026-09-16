@@ -992,7 +992,7 @@ func (s *Subsystem) bridgeMedia(ctx context.Context, call *database.Call) error 
 		SipCallTo:           call.Conference,
 		RoomName:            call.LKRoom,
 		ParticipantIdentity: call.LKIdentity,
-		ParticipantName:     phonenum.FromID(call.PortalID),
+		ParticipantName:     phonenum.NumberFromID(call.PortalID),
 		WaitUntilAnswered:   true,
 	})
 	if err != nil {
@@ -1076,7 +1076,7 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal) (*database.Call, er
 		return nil, fmt.Errorf("publish ghost RTC membership: %w", err)
 	}
 
-	uri := strings.ReplaceAll(s.cfg.OutboundURI, "{number}", phonenum.FromID(portalID))
+	uri := strings.ReplaceAll(s.cfg.OutboundURI, "{number}", phonenum.NumberFromID(portalID))
 	// The INVITE does not return until the phone is answered, so a Matrix user
 	// hanging up while it rings has to reach it through the context: that is
 	// what turns the hangup into a CANCEL.

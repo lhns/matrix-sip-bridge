@@ -65,7 +65,7 @@ What the bridge reads from the INVITE:
 
 | Header | Use |
 | --- | --- |
-| `X-Conference` (name configurable as `sip.conference_header`) | **Required.** The conference the caller will land in. It must be `calls.conference_prefix` (default `sip-`) followed by the caller's number in E.164 without the plus, e.g. `sip-15551234567`. The part after the prefix becomes the portal ID, so the portal room and the ghost are named from this header and from nothing else |
+| `X-Conference` (name configurable as `sip.conference_header`) | **Required.** The conference the caller will land in. It must be `calls.conference_prefix` (default `sip-`) followed by the portal ID, e.g. `sip-home-+15551234567`. The part after the prefix becomes the portal ID, so the portal room and the ghost are named from this header and from nothing else. See [ADR-0014](docs/adr/0014-a-portal-id-is-scoped-to-a-line.md) for the ID's two halves |
 | `From` | Logging only. Its user part is not used to route |
 | Request-URI / `To` | Not used. Put anything routable there |
 | Body | Must be an SDP offer containing PCMU (0) or PCMA (8) |
@@ -102,9 +102,10 @@ Dial first, ConfBridge after.
 ### Outbound calls
 
 When a Matrix user starts a call, the bridge sends an INVITE to
-`calls.outbound_uri` with `{number}` replaced by the destination in E.164
-including the plus, carrying the same conference header as inbound and an SDP
-offer of PCMU and PCMA. The dialplan should read the header, dial the number
+`calls.outbound_uri` with `{number}` replaced by the number half of the portal
+ID — E.164 including the plus, or a short number as its line spells it —
+carrying the same conference header as inbound and an SDP offer of PCMU and
+PCMA. The dialplan should read the header, dial the number
 into that conference, and hang the bridge's control leg up. That leg carries no
 media either.
 
@@ -173,7 +174,7 @@ send one that would not.
   portal keyed on a malformed identifier could never be replied to. The body is
   the message text, raw — not base64, and not carried in a custom header.
 - **From the bridge**: to `messages.outbound_to` with `{number}` replaced by the
-  destination in E.164 including the plus, from `messages.outbound_from`.
+  destination as the portal ID spells it, from `messages.outbound_from`.
 - chan_sip needs `accept_outofcall_message=yes` and an
   `outofcall_message_context`, globally and on the bridge's peer, or an inbound
   MESSAGE is refused before it reaches any dialplan.

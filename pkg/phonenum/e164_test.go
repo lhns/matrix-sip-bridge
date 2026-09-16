@@ -70,22 +70,10 @@ func TestIDRoundTrip(t *testing.T) {
 			if got := ToID(tt.e164); got != tt.id {
 				t.Errorf("ToID(%q) = %q, want %q", tt.e164, got, tt.id)
 			}
-			if got := FromID(tt.id); got != tt.e164 {
-				t.Errorf("FromID(%q) = %q, want %q", tt.id, got, tt.e164)
-			}
-			if got := FromID(ToID(tt.e164)); got != tt.e164 {
+			if got := NumberFromID(ToID(tt.e164)); got != tt.e164 {
 				t.Errorf("round trip of %q gave %q", tt.e164, got)
 			}
 		})
-	}
-}
-
-func TestFromIDIsIdempotent(t *testing.T) {
-	if got := FromID("+15551234567"); got != "+15551234567" {
-		t.Errorf("FromID on an already-prefixed number = %q", got)
-	}
-	if got := FromID(""); got != "" {
-		t.Errorf("FromID(\"\") = %q, want empty", got)
 	}
 }
 

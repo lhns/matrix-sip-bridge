@@ -42,7 +42,7 @@ func (sc *SIPConnector) dialCommand() *commands.FullHandler {
 				return
 			}
 			ce.Reply("Calling %s. Join the call in [the portal room](%s).",
-				phonenum.FromID(call.PortalID),
+				phonenum.NumberFromID(call.PortalID),
 				call.RoomID.URI().MatrixToURL())
 		},
 	}

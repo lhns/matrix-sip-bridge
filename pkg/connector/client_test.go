@@ -253,3 +253,49 @@ func counter(t *testing.T, g prometheus.Gatherer, name string, labels ...string)
 	t.Fatalf("no series %s%v in the registry", name, labels)
 	return 0
 }
+
+// Two lines to the same number are two portal rooms, and the room list is
+// where a user has to tell them apart.
+func TestPortalNameCarriesTheLineButTheGhostDoesNot(t *testing.T) {
+	tests := []struct {
+		portalID   string
+		roomName   string
+		ghostName  string
+		identifier []string
+	}{
+		{"15551234567", "+15551234567", "+15551234567", []string{"tel:+15551234567"}},
+		{"home-+15551234567", "+15551234567 (home)", "+15551234567", []string{"tel:+15551234567"}},
+		{"office-main-+15551234567", "+15551234567 (office-main)", "+15551234567", []string{"tel:+15551234567"}},
+		// A number that only means something on its own line is not a tel:
+		// URI, so the ghost publishes none.
+		{"office-1001", "1001 (office)", "1001", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.portalID, func(t *testing.T) {
+			var sc SIPClient
+			portal := &bridgev2.Portal{Portal: &database.Portal{
+				PortalKey: networkid.PortalKey{ID: networkid.PortalID(tt.portalID)},
+			}}
+			info, err := sc.GetChatInfo(context.Background(), portal)
+			if err != nil {
+				t.Fatalf("GetChatInfo: %v", err)
+			}
+			if info.Name == nil || *info.Name != tt.roomName {
+				t.Errorf("room name = %v, want %q", info.Name, tt.roomName)
+			}
+
+			// The ghost is the person on the other end, who is not per-line.
+			ghost := &bridgev2.Ghost{Ghost: &database.Ghost{ID: networkid.UserID(tt.portalID)}}
+			user, err := sc.GetUserInfo(context.Background(), ghost)
+			if err != nil {
+				t.Fatalf("GetUserInfo: %v", err)
+			}
+			if user.Name == nil || *user.Name != tt.ghostName {
+				t.Errorf("ghost name = %v, want %q", user.Name, tt.ghostName)
+			}
+			if !slices.Equal(user.Identifiers, tt.identifier) {
+				t.Errorf("ghost identifiers = %v, want %v", user.Identifiers, tt.identifier)
+			}
+		})
+	}
+}
