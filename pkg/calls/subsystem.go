@@ -18,6 +18,7 @@ import (
 	"maunium.net/go/mautrix/id"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/database"
+	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
 	"github.com/lhns/matrix-sip-bridge/pkg/phonenum"
 )
 
@@ -104,6 +105,12 @@ type Subsystem struct {
 	db  *database.Database
 	log zerolog.Logger
 
+	// metrics is a field rather than a package-level collector because
+	// TestNoPackageLevelMutableState forbids package state in this package,
+	// and because two subsystems in one test binary would otherwise share it.
+	// It may be nil; every Recorder method tolerates that.
+	metrics *metrics.Recorder
+
 	trunkID atomic.Pointer[string]
 
 	// trunkPushed is the fingerprint of the trunk spec this process last wrote
@@ -166,7 +173,7 @@ type Subsystem struct {
 func (s *Subsystem) OnTrunkState(fn func(error)) { s.onTrunkState.Store(&fn) }
 
 // New builds the subsystem. Start does the work.
-func New(cfg Config, br *bridgev2.Bridge, loginID networkid.UserLoginID, sip Telephony, db *database.Database, log zerolog.Logger) *Subsystem {
+func New(cfg Config, br *bridgev2.Bridge, loginID networkid.UserLoginID, sip Telephony, db *database.Database, log zerolog.Logger, rec *metrics.Recorder) *Subsystem {
 	if cfg.MembershipExpiry <= 0 {
 		cfg.MembershipExpiry = 6 * time.Hour
 	}
@@ -186,6 +193,7 @@ func New(cfg Config, br *bridgev2.Bridge, loginID networkid.UserLoginID, sip Tel
 		lk:       NewLiveKitClient(cfg.LiveKit),
 		db:       db,
 		log:      log,
+		metrics:  rec,
 		answered: make(map[string]chan struct{}),
 		declined: make(map[string]chan struct{}),
 		ended:    make(map[string]chan struct{}),
@@ -496,6 +504,7 @@ func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg 
 		log.Info().Msg("Call ended while it was being answered")
 		return
 	}
+	s.metrics.CallSetup(metricDirection(call.Direction), time.Since(call.CreatedAt))
 	if err := leg.Answer(); err != nil {
 		log.Err(err).Msg("Failed to answer the call")
 		_ = s.failCall(ctx, call, "could not connect")
@@ -794,6 +803,7 @@ func (s *Subsystem) endCallAs(ctx context.Context, call *database.Call, end call
 	if !mine {
 		return nil
 	}
+	s.metrics.Call(metricDirection(before.Direction), callOutcome(&before, end))
 	s.forgetSeen(call.CallID)
 	s.signalEnded(call.CallID)
 	// Before anything slower: this is what stops the phones ringing.
@@ -1100,6 +1110,8 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal) (*database.Call, er
 		}
 		return nil, ErrEndedWhileRinging
 	}
+
+	s.metrics.CallSetup(metricDirection(call.Direction), time.Since(call.CreatedAt))
 
 	if err := s.bridgeMedia(ctx, call); err != nil {
 		_ = s.failCall(ctx, call, mediaFailureReason(err))

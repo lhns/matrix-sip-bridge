@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,7 +15,10 @@ import (
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
 	"github.com/icholy/digest"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
+
+	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
 )
 
 // The peer's credentials. A static Asterisk peer whose source address the
@@ -197,6 +201,14 @@ func newFakePeer(t *testing.T, ctx context.Context) *fakePeer {
 // its address.
 func startBridge(t *testing.T, ctx context.Context, tune func(*Config)) (*Transport, string) {
 	t.Helper()
+	return startBridgeWithMetrics(t, ctx, tune, nil)
+}
+
+// startBridgeWithMetrics is startBridge for the tests that read the
+// collectors. The Recorder has to be in place before New, because the listener
+// timestamp is set as the socket binds.
+func startBridgeWithMetrics(t *testing.T, ctx context.Context, tune func(*Config), rec *metrics.Recorder) (*Transport, string) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -213,7 +225,7 @@ func startBridge(t *testing.T, ctx context.Context, tune func(*Config)) (*Transp
 	if tune != nil {
 		tune(&cfg)
 	}
-	tr, err := New(cfg, zerolog.Nop())
+	tr, err := New(cfg, zerolog.Nop(), rec)
 	if err != nil {
 		t.Fatalf("new transport: %v", err)
 	}
@@ -853,4 +865,87 @@ func TestOutboundRequestsAreFromTheConfiguredUsername(t *testing.T) {
 	case <-time.After(testTimeout):
 		t.Fatal("peer never received the MESSAGE")
 	}
+}
+
+// A body the bridge refuses is answered 415 and never reaches a handler, so
+// nothing but this counter says it happened.
+func TestRejectedInboundMessagesAreCounted(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	reg := prometheus.NewRegistry()
+	rec := metrics.New(reg)
+	tr, bridgeAddr := startBridgeWithMetrics(t, ctx, nil, rec)
+	tr.OnMessage(func(context.Context, InboundMessage) error { return nil })
+
+	peer := newFakePeer(t, ctx)
+	if res := peer.sendMessage(t, ctx, bridgeAddr, "application/json", `{"body":"hi"}`); res.StatusCode != 415 {
+		t.Fatalf("response = %d, want 415", res.StatusCode)
+	}
+	if got := counterValue(t, reg, "sip_bridge_messages_total", metrics.DirectionInbound, metrics.MessageRejectedMediaType); got != 1 {
+		t.Errorf("messages_total{inbound,%s} = %v, want 1", metrics.MessageRejectedMediaType, got)
+	}
+	// A pod that is up with a dead SIP side is the trap this gauge exists for,
+	// so it has to be set by the bind itself and not by the startup path
+	// around it.
+	if got := gaugeValue(t, reg, "sip_bridge_sip_listen_timestamp_seconds"); got <= 0 {
+		t.Errorf("sip_listen_timestamp = %v after the listener bound, want the bind time", got)
+	}
+}
+
+// An oversized outbound message is refused before it reaches a socket, which
+// is the one outbound outcome no SIP response can explain.
+func TestOversizedOutboundMessagesAreCounted(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	reg := prometheus.NewRegistry()
+	rec := metrics.New(reg)
+	tr, _ := startBridgeWithMetrics(t, ctx, nil, rec)
+	peer := newFakePeer(t, ctx)
+	err := tr.SendMessage(ctx, "sip:15551234567@"+peer.addr, "sip:15559876543@example.com",
+		strings.Repeat("x", maxPacketSize))
+	if err == nil {
+		t.Fatal("an oversized message was sent")
+	}
+	if got := counterValue(t, reg, "sip_bridge_messages_total", metrics.DirectionOutbound, metrics.MessageTooLong); got != 1 {
+		t.Errorf("messages_total{outbound,%s} = %v, want 1", metrics.MessageTooLong, got)
+	}
+}
+
+// counterValue and gaugeValue read one series out of a registry.
+func counterValue(t *testing.T, g prometheus.Gatherer, name string, labels ...string) float64 {
+	t.Helper()
+	counter, _ := seriesValue(t, g, name, labels)
+	return counter
+}
+
+func gaugeValue(t *testing.T, g prometheus.Gatherer, name string) float64 {
+	t.Helper()
+	_, gauge := seriesValue(t, g, name, nil)
+	return gauge
+}
+
+func seriesValue(t *testing.T, g prometheus.Gatherer, name string, labels []string) (counter, gauge float64) {
+	t.Helper()
+	families, err := g.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range families {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			var values []string
+			for _, l := range m.GetLabel() {
+				values = append(values, l.GetValue())
+			}
+			if slices.Equal(values, labels) {
+				return m.GetCounter().GetValue(), m.GetGauge().GetValue()
+			}
+		}
+	}
+	t.Fatalf("no series %s%v in the registry", name, labels)
+	return 0, 0
 }

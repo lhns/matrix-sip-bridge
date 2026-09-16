@@ -18,6 +18,7 @@ import (
 
 	"github.com/lhns/matrix-sip-bridge/pkg/calls"
 	sipdb "github.com/lhns/matrix-sip-bridge/pkg/database"
+	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
 	"github.com/lhns/matrix-sip-bridge/pkg/siptransport"
 )
 
@@ -25,11 +26,12 @@ import (
 type SIPConnector struct {
 	Config Config
 
-	br     *bridgev2.Bridge
-	sip    *siptransport.Transport
-	calls  *calls.Subsystem
-	db     *sipdb.Database
-	health *callHealth
+	br      *bridgev2.Bridge
+	sip     *siptransport.Transport
+	calls   *calls.Subsystem
+	db      *sipdb.Database
+	health  *callHealth
+	metrics *metrics.Recorder
 
 	// cancel stops the SIP endpoint and the call subsystem loops.
 	cancel context.CancelFunc
@@ -52,9 +54,12 @@ func (sc *SIPConnector) Init(bridge *bridgev2.Bridge) {
 	// The logger labels this schema's upgrade, not its queries; see sipdb.New.
 	sc.db = sipdb.New(bridge.DB.Database, bridge.Log.With().Str("db_section", "sip").Logger())
 	bridge.Commands.(*commands.Processor).AddHandlers(sc.dialCommand())
+	reg := metrics.NewRegistry()
+	sc.metrics = metrics.New(reg)
 	// Init is the last point before the appservice HTTP server starts serving.
 	if mx, ok := bridge.Matrix.(*matrix.Connector); ok {
 		sc.registerReadiness(mx.AS)
+		sc.registerMetrics(mx.AS, reg)
 	}
 }
 
@@ -67,7 +72,7 @@ func (sc *SIPConnector) Start(ctx context.Context) error {
 
 	sc.warnAboutRelay()
 
-	sip, err := siptransport.New(sc.Config.SIP, sc.br.Log.With().Str("component", "sip").Logger())
+	sip, err := siptransport.New(sc.Config.SIP, sc.br.Log.With().Str("component", "sip").Logger(), sc.metrics)
 	if err != nil {
 		cancel()
 		return err
@@ -76,7 +81,7 @@ func (sc *SIPConnector) Start(ctx context.Context) error {
 	sc.calls = calls.New(
 		sc.Config.Calls, sc.br, networkid.UserLoginID(LoginID),
 		sipTelephony{sip, sc.Config.SIP.ConferenceHeader}, sc.db,
-		sc.br.Log.With().Str("component", "calls").Logger(),
+		sc.br.Log.With().Str("component", "calls").Logger(), sc.metrics,
 	)
 
 	sc.calls.OnTrunkState(func(err error) { sc.report(sc.health.Trunk(err)) })
@@ -123,7 +128,13 @@ func (sc *SIPConnector) watchSIPHealth(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			sc.report(sc.health.SIP(sc.sipReady()))
+			ready := sc.sipReady()
+			// Set unconditionally, and from here rather than from a poll of
+			// its own: health.SIP suppresses an unchanged state, so a gauge
+			// set only when the bridge state moved would go stale, and a
+			// second poll could disagree with the state the room was told.
+			sc.metrics.SIPRegistered(ready)
+			sc.report(sc.health.SIP(ready))
 		}
 	}
 }

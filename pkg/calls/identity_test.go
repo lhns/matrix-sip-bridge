@@ -153,7 +153,7 @@ func TestParticipantIdentityMatchesTheMemberID(t *testing.T) {
 // The scheme a deployment needs cannot be guessed from the room, so it is
 // configured. This pins which one an unconfigured bridge emits.
 func TestDefaultIdentitySchemeIsUserDevice(t *testing.T) {
-	s := New(Config{}, nil, "", nil, nil, zerolog.Nop())
+	s := New(Config{}, nil, "", nil, nil, zerolog.Nop(), nil)
 	if s.cfg.IdentityScheme != IdentityUserDevice {
 		t.Errorf("default identity scheme = %q, want %q", s.cfg.IdentityScheme, IdentityUserDevice)
 	}
@@ -177,7 +177,7 @@ func TestIdentityForIsSelfConsistent(t *testing.T) {
 	)
 	for _, scheme := range []IdentityScheme{IdentityUserDevice, IdentityHashed} {
 		t.Run(string(scheme), func(t *testing.T) {
-			s := New(Config{IdentityScheme: scheme}, nil, "", nil, nil, zerolog.Nop())
+			s := New(Config{IdentityScheme: scheme}, nil, "", nil, nil, zerolog.Nop(), nil)
 			ident := s.identityFor(user, callID)
 
 			if ident.userID != user {

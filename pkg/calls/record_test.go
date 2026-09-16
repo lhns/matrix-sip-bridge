@@ -6,10 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/event"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/database"
+	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
 )
 
 // bodies returns the plain messages the ghost put in the room, which is what a
@@ -51,6 +53,103 @@ func TestCallRecordsSayWhatHappened(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The outcome label is a closed set, and the counter and the room record are
+// two readings of the same switch. A state or a callEnd shape that fell
+// through it would produce an empty label -- a bucket nobody named, that no
+// dashboard queries and that no alert can miss -- so every combination the
+// code can reach is enumerated here rather than sampled.
+func TestEveryCallHasAnOutcome(t *testing.T) {
+	closed := map[string]bool{
+		metrics.OutcomeAnswered: true,
+		metrics.OutcomeMissed:   true,
+		metrics.OutcomeDeclined: true,
+		metrics.OutcomeFailed:   true,
+		metrics.OutcomeStale:    true,
+	}
+	ends := map[string]callEnd{
+		"plain":    {},
+		"declined": {Declined: true},
+		"failure":  {Failure: "no route"},
+		"quiet":    {Quiet: true},
+	}
+	for _, direction := range []database.CallDirection{database.DirectionInbound, database.DirectionOutbound} {
+		for _, state := range []database.CallState{database.StateRinging, database.StateBridged, database.StateEnded} {
+			for name, end := range ends {
+				call := database.Call{Direction: direction, State: state}
+				got := callOutcome(&call, end)
+				if !closed[got] {
+					t.Errorf("%s/%s/%s has outcome %q, which is not in the closed set",
+						direction, state, name, got)
+				}
+				// The record the room gets comes off the same switch, so a
+				// combination that renders nothing is the same bug.
+				if body := callRecordBody(&call, end, time.Now()); body == "" {
+					t.Errorf("%s/%s/%s leaves the room no record", direction, state, name)
+				}
+			}
+		}
+	}
+}
+
+// A row discarded by bookkeeping long after its call ended says nothing about
+// that call. Folding it into "missed" would make a teardown bug look like
+// callers giving up, which is the one thing the counter would be consulted to
+// rule out.
+func TestAStaleRowIsItsOwnOutcome(t *testing.T) {
+	call := database.Call{Direction: database.DirectionInbound, State: database.StateRinging}
+	if got := callOutcome(&call, callEnd{Quiet: true}); got != metrics.OutcomeStale {
+		t.Errorf("a stale row counted as %q, want %q", got, metrics.OutcomeStale)
+	}
+}
+
+// The counter and the room record are two readings of one call, taken on the
+// same path. This is the assertion that they are taken from the same switch:
+// if they ever disagree, nothing in a dashboard says which of them is wrong.
+func TestAMissedCallIsCountedAsTheRoomRecordsIt(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	h := newHarness(t)
+	h.metrics = metrics.New(reg)
+	call := h.insertRinging(t)
+	waiters := h.waitersFor(call.CallID)
+	defer h.forgetWaiters(call.CallID)
+
+	leg := newFakeInboundLeg()
+	leg.finish() // the caller gave up
+	h.waitForMatrix(t.Context(), call, leg, zerolog.Nop(), waiters)
+
+	if got := h.intent.bodies(); len(got) != 1 || got[0] != "Missed call" {
+		t.Fatalf("the room was told %v, want one \"Missed call\"", got)
+	}
+	if got := callCount(t, reg, metrics.DirectionInbound, metrics.OutcomeMissed); got != 1 {
+		t.Errorf("calls_total{inbound,missed} = %v, want 1", got)
+	}
+}
+
+// callCount reads one series of sip_bridge_calls_total.
+func callCount(t *testing.T, g prometheus.Gatherer, direction, outcome string) float64 {
+	t.Helper()
+	families, err := g.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range families {
+		if mf.GetName() != "sip_bridge_calls_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["direction"] == direction && labels["outcome"] == outcome {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	t.Fatalf("no calls_total{%s,%s} series", direction, outcome)
+	return 0
 }
 
 // A call short enough to round to nothing still lasted; hours have to survive

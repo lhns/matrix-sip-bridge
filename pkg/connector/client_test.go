@@ -2,13 +2,19 @@ package connector
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+
+	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
+	"github.com/lhns/matrix-sip-bridge/pkg/siptransport"
 )
 
 func TestParseInboundMessage(t *testing.T) {
@@ -178,4 +184,72 @@ func TestChatInfoIsADirectChat(t *testing.T) {
 	if info.Members.IsFull {
 		t.Error("the member list must not be marked full")
 	}
+}
+
+// The two ways an inbound text disappears, both of which are invisible from
+// the SIP side: the first because the bridge deliberately answers 200 to a
+// sender it cannot key a portal on, and the second because nothing is logged
+// anywhere the far end can read. The counters are the only trace either
+// leaves.
+func TestInboundMessageDropsAreCounted(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		in      siptransport.InboundMessage
+		outcome string
+		// wantErr is what the transport turns into a status: nil is answered
+		// 200, an error 500.
+		wantErr bool
+	}{
+		{
+			name:    "unparseable sender",
+			in:      siptransport.InboundMessage{From: "sip:anonymous@example.com", To: "sip:15551234567@example.com", Body: "hi"},
+			outcome: metrics.MessageDroppedBadSender,
+		},
+		{
+			name:    "nobody logged in",
+			in:      siptransport.InboundMessage{From: "sip:+15551234567@example.com", To: "sip:15557654321@example.com", Body: "hi"},
+			outcome: metrics.MessageDroppedNoLogin,
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := prometheus.NewRegistry()
+			sc := &SIPConnector{
+				br:      &bridgev2.Bridge{Log: zerolog.Nop()},
+				metrics: metrics.New(reg),
+			}
+			err := sc.handleInboundMessage(context.Background(), tc.in)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("handleInboundMessage error = %v, want error: %v", err, tc.wantErr)
+			}
+			if got := counter(t, reg, "sip_bridge_messages_total", metrics.DirectionInbound, tc.outcome); got != 1 {
+				t.Errorf("messages_total{inbound,%s} = %v, want 1", tc.outcome, got)
+			}
+		})
+	}
+}
+
+// counter reads one series of a labelled counter out of a registry.
+func counter(t *testing.T, g prometheus.Gatherer, name string, labels ...string) float64 {
+	t.Helper()
+	families, err := g.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range families {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			var values []string
+			for _, l := range m.GetLabel() {
+				values = append(values, l.GetValue())
+			}
+			if slices.Equal(values, labels) {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	t.Fatalf("no series %s%v in the registry", name, labels)
+	return 0
 }

@@ -160,6 +160,7 @@ func (s *Subsystem) reconcileAndReport(ctx context.Context) {
 		// Shutdown cancelled it; that is not a fault to report.
 		return
 	}
+	s.metrics.TrunkReconcile(err)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("Failed to reconcile LiveKit outbound trunk")
 	}

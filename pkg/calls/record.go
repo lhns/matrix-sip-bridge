@@ -9,6 +9,7 @@ import (
 	"maunium.net/go/mautrix/event"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/database"
+	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
 )
 
 // callEnd is why a call ended, beyond what the row itself says.
@@ -40,29 +41,68 @@ func mediaFailureReason(err error) string {
 	return "could not connect"
 }
 
+// callOutcome classifies a finished call.
+//
+// It is the single switch behind both halves of what a finished call produces:
+// the record in the portal room and the calls_total counter. Two switches
+// would drift, the room and the metric would then disagree, and nothing would
+// say which of them was lying.
+//
+// The returned value is always one of the metrics.Outcome constants, which is
+// the closed set the counter's label is allowed to take; see
+// TestEveryCallHasAnOutcome.
+func callOutcome(call *database.Call, end callEnd) string {
+	switch {
+	case end.Quiet:
+		// A row ended by bookkeeping hours later. It says nothing about the
+		// call, so it is neither missed nor failed.
+		return metrics.OutcomeStale
+	case end.Failure != "":
+		return metrics.OutcomeFailed
+	// UpdatedAt is the ringing -> bridged transition for an answered call,
+	// which is the nearest thing the row has to an answer time; see
+	// database.Call.UpdatedAt.
+	case call.State == database.StateBridged:
+		return metrics.OutcomeAnswered
+	case end.Declined:
+		return metrics.OutcomeDeclined
+	default:
+		return metrics.OutcomeMissed
+	}
+}
+
+// metricDirection maps a row's direction onto the metrics label. The two sets
+// of constants happen to spell the same words; going through here is what
+// stops a rename on either side silently renaming a label.
+func metricDirection(d database.CallDirection) string {
+	if d == database.DirectionOutbound {
+		return metrics.DirectionOutbound
+	}
+	return metrics.DirectionInbound
+}
+
 // callRecordBody renders the timeline record of a finished call.
 //
 // It deliberately never names the number: the record is posted in that
 // number's own portal, where repeating it is noise, and keeping it out is also
 // what keeps the rendered strings free of personal data.
 func callRecordBody(call *database.Call, end callEnd, now time.Time) string {
-	if end.Failure != "" {
+	outbound := call.Direction == database.DirectionOutbound
+	switch callOutcome(call, end) {
+	case metrics.OutcomeFailed:
 		return "Call failed — " + end.Failure
-	}
-	// UpdatedAt is the ringing -> bridged transition for an answered call,
-	// which is the nearest thing the row has to an answer time; see
-	// database.Call.UpdatedAt.
-	answered := call.State == database.StateBridged
-	switch {
-	case answered && call.Direction == database.DirectionOutbound:
-		return "Outgoing call — " + formatCallDuration(now.Sub(call.UpdatedAt))
-	case answered:
+	case metrics.OutcomeAnswered:
+		if outbound {
+			return "Outgoing call — " + formatCallDuration(now.Sub(call.UpdatedAt))
+		}
 		return "Incoming call — " + formatCallDuration(now.Sub(call.UpdatedAt))
-	case end.Declined:
+	case metrics.OutcomeDeclined:
 		return "Call declined"
-	case call.Direction == database.DirectionOutbound:
-		return "Outgoing call — no answer"
 	default:
+		// Missed, and stale -- which postCallRecord never renders.
+		if outbound {
+			return "Outgoing call — no answer"
+		}
 		return "Missed call"
 	}
 }

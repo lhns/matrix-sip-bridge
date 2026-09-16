@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/emiago/sipgo/sip"
+
+	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
 )
 
 // contentTypeText is the only body chan_sip's ast_msg_tech accepts. Anything
@@ -18,10 +20,12 @@ const contentTypeText = "text/plain"
 func (t *Transport) handleMessage(req *sip.Request, tx sip.ServerTransaction) {
 	h := t.onMessage.Load()
 	if h == nil {
+		t.metrics.Message(metrics.DirectionInbound, metrics.MessageRejectedNoHandler)
 		t.respond(req, tx, 405, "Method Not Allowed")
 		return
 	}
 	if ct := req.ContentType(); ct == nil || !isTextPlain(string(*ct)) {
+		t.metrics.Message(metrics.DirectionInbound, metrics.MessageRejectedMediaType)
 		t.respond(req, tx, 415, "Unsupported Media Type")
 		return
 	}
@@ -38,6 +42,10 @@ func (t *Transport) handleMessage(req *sip.Request, tx sip.ServerTransaction) {
 	// Transport.baseCtx for why it is not the transaction's own.
 	ctx, cancel := context.WithTimeout(t.baseCtx, messageHandlerTimeout)
 	defer cancel()
+	// Only the two refusals above are counted here. Everything past this line
+	// is the handler's own outcome -- including the messages it drops while
+	// still asking for a 200 -- and it counts them itself, so that one message
+	// never lands in two buckets.
 	if err := (*h)(ctx, msg); err != nil {
 		t.log.Warn().Err(err).Msg("Rejecting inbound SIP MESSAGE")
 		t.respond(req, tx, 500, "Server Internal Error")
@@ -76,16 +84,23 @@ func (t *Transport) SendMessage(ctx context.Context, to, from, body string) erro
 	// Checked on the whole serialised request rather than on the body,
 	// because it is the packet that is capped; see maxPacketSize.
 	if n := len(req.String()); n > maxPacketSize {
+		t.metrics.Message(metrics.DirectionOutbound, metrics.MessageTooLong)
 		return fmt.Errorf("message is %d bytes, over the %d-byte SIP packet limit", n, maxPacketSize)
 	}
 
 	res, err := t.doWithDigest(ctx, req)
 	if err != nil {
+		t.metrics.Message(metrics.DirectionOutbound, metrics.MessageError)
 		return fmt.Errorf("send MESSAGE: %w", err)
 	}
 	if !res.IsSuccess() {
+		// A trunk that carries calls but refuses text answers every MESSAGE
+		// the same way forever. The status code stays out of the label and
+		// goes in the returned error, which is what the caller logs.
+		t.metrics.Message(metrics.DirectionOutbound, metrics.MessageRejected)
 		return fmt.Errorf("MESSAGE rejected: %d %s", res.StatusCode, res.Reason)
 	}
+	t.metrics.Message(metrics.DirectionOutbound, metrics.MessageSent)
 	return nil
 }
 

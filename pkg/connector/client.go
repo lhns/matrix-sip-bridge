@@ -16,6 +16,7 @@ import (
 	"maunium.net/go/mautrix/event"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/calls"
+	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
 	"github.com/lhns/matrix-sip-bridge/pkg/phonenum"
 	"github.com/lhns/matrix-sip-bridge/pkg/siptransport"
 )
@@ -232,12 +233,15 @@ func (sc *SIPConnector) handleInboundMessage(_ context.Context, in siptransport.
 	if err != nil {
 		log.Warn().Err(err).Msg("Ignoring unusable inbound message")
 		// The message is unusable, not undelivered; answering with a failure
-		// would only make the far end retry it.
+		// would only make the far end retry it. The 200 is also why this drop
+		// is invisible from the SIP side and has to be counted here.
+		sc.metrics.Message(metrics.DirectionInbound, metrics.MessageDroppedBadSender)
 		return nil
 	}
 	login := sc.br.GetCachedUserLoginByID(networkid.UserLoginID(LoginID))
 	if login == nil {
 		log.Warn().Msg("Dropping inbound message: nobody has logged in yet")
+		sc.metrics.Message(metrics.DirectionInbound, metrics.MessageDroppedNoLogin)
 		return fmt.Errorf("no login yet")
 	}
 	portalID := phonenum.ToID(msg.From)
@@ -258,6 +262,7 @@ func (sc *SIPConnector) handleInboundMessage(_ context.Context, in siptransport.
 		ID:                 networkid.MessageID(fmt.Sprintf("in-%s-%d", portalID, time.Now().UnixNano())),
 		ConvertMessageFunc: convertInboundMessage,
 	})
+	sc.metrics.Message(metrics.DirectionInbound, metrics.MessageBridged)
 	return nil
 }
 

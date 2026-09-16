@@ -22,6 +22,8 @@ import (
 	"github.com/emiago/sipgo/sip"
 	"github.com/icholy/digest"
 	"github.com/rs/zerolog"
+
+	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
 )
 
 // maxPacketSize is chan_sip's SIP_MAX_PACKET_SIZE. A larger request is
@@ -53,6 +55,8 @@ type InboundMessage struct {
 type Transport struct {
 	cfg Config
 	log zerolog.Logger
+	// metrics may be nil; every Recorder method tolerates that.
+	metrics *metrics.Recorder
 
 	ua  *sipgo.UserAgent
 	srv *sipgo.Server
@@ -85,7 +89,7 @@ type Transport struct {
 
 // New builds the user agent and registers the request handlers. It does not
 // open a socket; Run does that.
-func New(cfg Config, log zerolog.Logger) (*Transport, error) {
+func New(cfg Config, log zerolog.Logger, rec *metrics.Recorder) (*Transport, error) {
 	cfg.ApplyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -126,6 +130,7 @@ func New(cfg Config, log zerolog.Logger) (*Transport, error) {
 	t := &Transport{
 		cfg:        cfg,
 		log:        log,
+		metrics:    rec,
 		ua:         ua,
 		srv:        srv,
 		cli:        cli,
@@ -202,6 +207,10 @@ func (t *Transport) RunWithListener(ctx context.Context, ln net.Listener) error 
 
 func (t *Transport) serve(ctx context.Context, serve func() error, closer io.Closer) error {
 	t.listening.Store(true)
+	// The one moment worth a timestamp: everything before it is the startup
+	// window the readiness endpoint covers, and a listener that never binds
+	// leaves the gauge at zero.
+	t.metrics.SIPListening()
 	defer t.listening.Store(false)
 	go func() {
 		<-ctx.Done()

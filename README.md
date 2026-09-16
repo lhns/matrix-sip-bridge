@@ -366,6 +366,38 @@ the Matrix side out of the Service with it.
 The endpoint is served on the appservice router, so it does not exist when the
 bridge is configured for appservice websocket transport or `no_server`.
 
+### Metrics
+
+`GET /metrics` is served on the **appservice** port too, beside the readiness
+endpoint, so scraping needs no second container port and no Service entry. It
+is always on and has no config key. Six families, all present at zero from
+startup so that "did this stop?" can be asked of any of them:
+
+| metric | type | labels |
+| --- | --- | --- |
+| `sip_bridge_calls_total` | counter | `direction`, `outcome` |
+| `sip_bridge_call_setup_seconds` | histogram | `direction` |
+| `sip_bridge_sip_registered` | gauge | — |
+| `sip_bridge_trunk_reconcile_total` | counter | `result` |
+| `sip_bridge_messages_total` | counter | `direction`, `outcome` |
+| `sip_bridge_start_timestamp_seconds`, `sip_bridge_sip_listen_timestamp_seconds` | gauges | — |
+
+`messages_total` is where the silent failures become countable: an inbound
+message whose `From` will not parse is answered 200 and dropped, and a trunk
+that carries calls but refuses text rejects every outbound MESSAGE. Neither
+appears anywhere else but the log. The two timestamps give the startup window
+readiness exists to close as a subtraction, and a SIP listener that never bound
+leaves `sip_listen` at zero.
+
+Every label value comes from a closed set fixed at compile time — no number, no
+room, no call ID, and no SIP status code, which is carrier-controlled and
+unbounded. That rule is what makes an unauthenticated `/metrics` inside the
+vnet acceptable; see the comment at the top of
+[pkg/metrics/metrics.go](pkg/metrics/metrics.go) before adding a label.
+
+Like readiness, the endpoint does not exist under websocket transport or
+`no_server`.
+
 ### Image tags
 
 CI publishes to `ghcr.io/lhns/matrix-sip-bridge`. Every push to `main` produces
@@ -384,6 +416,7 @@ pkg/connector/             bridgev2 NetworkConnector and NetworkAPI (messaging)
   config.go                  network config struct and upgrader
   health.go                  the two faults a call needs, as one bridge state
   readiness.go               the /_health/ready endpoint the k8s probe uses
+  metrics.go                 the /metrics endpoint, on the same router
   example-config.yaml        shipped as the base for config upgrades
 pkg/siptransport/          the SIP user agent: sipgo, no media stack
   config.go                  endpoint config, its defaults and its validation
@@ -403,6 +436,7 @@ pkg/calls/                 the call subsystem, independent of bridgev2 plumbing
   identity.go                LiveKit room-name and participant-identity derivation
   livekit.go                 twirp JSON client for the LiveKit SIP and room APIs
   trunk.go                   outbound-trunk reconciliation (Redis loses it)
+pkg/metrics/               the Prometheus collectors and the cardinality rule
 pkg/phonenum/              E.164 normalisation and portal-ID round trips
 pkg/database/              db.Child() tables for call state, separate from bridgev2
 docs/adr/                  architecture decision records
