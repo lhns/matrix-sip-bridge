@@ -245,10 +245,42 @@ func (sc *SIPConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
 	return &bridgev2.NetworkGeneralCapabilities{}
 }
 
-// GetDBMetaTypes declares no extra metadata. Everything the bridge remembers
-// beyond bridgev2's own tables is call state, which lives in its own schema.
+// PortalMetadata is the bridge's own portal state. It lands in bridgev2's
+// existing portal.metadata JSON column, so a field needs no migration.
+type PortalMetadata struct {
+	// NameSetByUser records that a Matrix user named this room. bridgev2's
+	// NameSet and NameIsCustom do not mean that -- both are true of a name the
+	// bridge itself set -- so the flag has to be the bridge's own.
+	NameSetByUser bool `json:"name_set_by_user,omitempty"`
+}
+
+// portalMeta reads the metadata of a portal that may have none: one
+// constructed in a test, or read back from before this type was declared.
+func portalMeta(portal *bridgev2.Portal) *PortalMetadata {
+	if meta, ok := portal.Metadata.(*PortalMetadata); ok {
+		return meta
+	}
+	return &PortalMetadata{}
+}
+
+// portalMetaFor returns the metadata to write to, attaching one if the portal
+// has none.
+func portalMetaFor(portal *bridgev2.Portal) *PortalMetadata {
+	meta, ok := portal.Metadata.(*PortalMetadata)
+	if !ok {
+		meta = &PortalMetadata{}
+		portal.Metadata = meta
+	}
+	return meta
+}
+
+// GetDBMetaTypes declares the portal metadata above. Everything else the
+// bridge remembers beyond bridgev2's own tables is call state, which lives in
+// its own schema.
 func (sc *SIPConnector) GetDBMetaTypes() database.MetaTypes {
-	return database.MetaTypes{}
+	return database.MetaTypes{
+		Portal: func() any { return &PortalMetadata{} },
+	}
 }
 
 // LoadUserLogin attaches the client to the one static login.

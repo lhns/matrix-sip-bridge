@@ -31,6 +31,7 @@ type SIPClient struct {
 var (
 	_ bridgev2.NetworkAPI                    = (*SIPClient)(nil)
 	_ bridgev2.IdentifierResolvingNetworkAPI = (*SIPClient)(nil)
+	_ bridgev2.RoomNameHandlingNetworkAPI    = (*SIPClient)(nil)
 )
 
 // Connect reports the SIP endpoint's state to Matrix. The endpoint itself is
@@ -136,7 +137,7 @@ func (sc *SIPClient) GetCapabilities(_ context.Context, portal *bridgev2.Portal)
 // or -- for the one portal per line that is a space -- the line itself.
 func (sc *SIPClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
 	if line := phonenum.LineFromSpaceID(string(portal.ID)); line != "" {
-		return spaceChatInfo(line), nil
+		return keepUserName(portal, spaceChatInfo(line)), nil
 	}
 	info := &bridgev2.ChatInfo{
 		Name: ptr.Ptr(portalName(string(portal.ID))),
@@ -164,7 +165,7 @@ func (sc *SIPClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (*b
 			// users_default — so the call button has to be unlocked by
 			// lowering the event instead of raising the user.
 			PowerLevels: &bridgev2.PowerLevelOverrides{
-				Events: calls.MembershipPowerLevels(),
+				Events: portalEventPowerLevels(),
 			},
 		},
 	}
@@ -175,7 +176,93 @@ func (sc *SIPClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (*b
 	if space, err := phonenum.SpaceIDFor(phonenum.LineFromID(string(portal.ID))); err == nil {
 		info.ParentID = ptr.Ptr(networkid.PortalID(space))
 	}
-	return info, nil
+	return keepUserName(portal, info), nil
+}
+
+// portalEventPowerLevels is what a portal room lets a plain user send.
+//
+// Deliberately not folded into calls.MembershipPowerLevels: that set is the
+// authoritative list of call-related events and is iterated elsewhere to
+// decide whether a room's call power levels are already applied.
+func portalEventPowerLevels() map[event.Type]int {
+	levels := calls.MembershipPowerLevels()
+	// Without this the room has state_default 50 and the user users_default 0,
+	// so Element offers no rename at all.
+	levels[event.StateRoomName] = 0
+	return levels
+}
+
+// keepUserName drops the bridge's name from a description whose room a user
+// has renamed.
+//
+// nil is the only value that means "leave the name alone".
+// bridgev2.DefaultChatName instead clears it and hands naming to the ghost
+// profile, which under private_chat_portal_meta renames the room to the bare
+// number.
+//
+// The flag outlives a tombstone but NameSet does not, so the replacement room
+// starts with no name at all rather than with the bridge's.
+func keepUserName(portal *bridgev2.Portal, info *bridgev2.ChatInfo) *bridgev2.ChatInfo {
+	if portalMeta(portal).NameSetByUser {
+		info.Name = nil
+	}
+	return info
+}
+
+// HandleMatrixRoomName records that a Matrix user named this room, so that
+// nothing the bridge later asserts -- a changed portalName format, a resync
+// after a tombstone reset NameSet, or revert_failed_state_changes -- silently
+// takes their name away again.
+//
+// Only a third party's rename reaches this: the Matrix connector drops state
+// from the bridge bot and from ghosts, and anything carrying the double-puppet
+// marker. Returning true is what makes bridgev2 persist the portal, so nothing
+// here saves it.
+func (sc *SIPClient) HandleMatrixRoomName(_ context.Context, msg *bridgev2.MatrixRoomName) (bool, error) {
+	meta := portalMetaFor(msg.Portal)
+	if msg.Content.Name == "" {
+		// Element's rename dialog can submit an empty name, and it means
+		// "give me the bridge's name back" rather than a room with no name.
+		// NameSet false is what makes the resync below re-send a name the
+		// portal already records; updateName early-returns on an equal name
+		// that is already set.
+		meta.NameSetByUser = false
+		msg.Portal.Name = bridgeRoomName(string(msg.Portal.ID))
+		msg.Portal.NameSet = false
+		// In a goroutine: with PortalEventBuffer 0 a portal handles its events
+		// inline under a lock this handler is already inside.
+		go sc.resyncPortalName(msg.Portal)
+		return true, nil
+	}
+	meta.NameSetByUser = true
+	msg.Portal.Name = msg.Content.Name
+	msg.Portal.NameSet = true
+	return true, nil
+}
+
+// resyncPortalName re-asserts the bridge's name over a room that was reset.
+// Without it the room keeps the empty name until something else resyncs the
+// portal, which may be the next restart.
+func (sc *SIPClient) resyncPortalName(portal *bridgev2.Portal) {
+	if portal.MXID == "" {
+		return
+	}
+	sc.UserLogin.Bridge.QueueRemoteEvent(sc.UserLogin, &simplevent.ChatResync{
+		EventMeta: simplevent.EventMeta{
+			Type:      bridgev2.RemoteEventChatResync,
+			PortalKey: portal.PortalKey,
+		},
+		GetChatInfoFunc: sc.GetChatInfo,
+	})
+}
+
+// bridgeRoomName is the name the bridge gives a portal: the line for a line's
+// space, the number for everything else.
+func bridgeRoomName(portalID string) string {
+	if line := phonenum.LineFromSpaceID(portalID); line != "" {
+		return line
+	}
+	return portalName(portalID)
 }
 
 // spaceChatInfo describes a line's space, the parent every portal on that

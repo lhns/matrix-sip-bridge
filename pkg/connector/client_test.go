@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
+	"github.com/lhns/matrix-sip-bridge/pkg/calls"
 	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
 	"github.com/lhns/matrix-sip-bridge/pkg/phonenum"
 	"github.com/lhns/matrix-sip-bridge/pkg/siptransport"
@@ -546,5 +548,194 @@ func TestALineSpaceIsNotResolvableAsAnIdentifier(t *testing.T) {
 		if resp, err := sc.ResolveIdentifier(context.Background(), identifier, false); err == nil {
 			t.Errorf("ResolveIdentifier(%q) resolved to %+v", identifier, resp)
 		}
+	}
+}
+
+// renamedPortal is a portal a user has already renamed.
+func renamedPortal(portalID string) *bridgev2.Portal {
+	portal := portalFor(portalID)
+	portal.Metadata = &PortalMetadata{NameSetByUser: true}
+	return portal
+}
+
+// The bridge owns a portal's name until a user takes it: GetChatInfo must then
+// leave the name out of the description entirely, because every other value --
+// bridgev2.DefaultChatName above all -- is an instruction to change it.
+func TestChatInfoLeavesAUserRenamedRoomAlone(t *testing.T) {
+	for _, tc := range []struct {
+		portalID  string
+		wantName  string
+		wantSpace bool
+	}{
+		{portalID: "home-+15551234567", wantName: "+15551234567 (home)"},
+		{portalID: "15551234567", wantName: "+15551234567"},
+		// A line's space is named after the line, and is renameable too.
+		{portalID: "home-space", wantName: "home", wantSpace: true},
+	} {
+		t.Run(tc.portalID, func(t *testing.T) {
+			var sc SIPClient
+			info, err := sc.GetChatInfo(context.Background(), portalFor(tc.portalID))
+			if err != nil {
+				t.Fatalf("GetChatInfo: %v", err)
+			}
+			if info.Name == nil || *info.Name != tc.wantName {
+				t.Fatalf("name = %v, want %q", info.Name, tc.wantName)
+			}
+
+			renamed, err := sc.GetChatInfo(context.Background(), renamedPortal(tc.portalID))
+			if err != nil {
+				t.Fatalf("GetChatInfo: %v", err)
+			}
+			if renamed.Name != nil {
+				t.Errorf("name = %q, want nil so that the room keeps the user's", *renamed.Name)
+			}
+			// Suppressing the name must not quietly change the room into
+			// something else.
+			if (renamed.Type == nil) != (info.Type == nil) || *renamed.Type != *info.Type {
+				t.Errorf("room type = %v, want %v", renamed.Type, info.Type)
+			}
+			if tc.wantSpace {
+				if renamed.Members != nil {
+					t.Errorf("the space grew a member list: %+v", renamed.Members)
+				}
+				if renamed.ParentID != nil {
+					t.Errorf("the space grew the parent %q", *renamed.ParentID)
+				}
+				return
+			}
+			if renamed.Members == nil || renamed.Members.OtherUserID != info.Members.OtherUserID {
+				t.Errorf("member list = %+v, want the same DM partner as %+v", renamed.Members, info.Members)
+			}
+			if renamed.Members.IsFull {
+				t.Error("the member list must not be marked full")
+			}
+			if (renamed.ParentID == nil) != (info.ParentID == nil) ||
+				(renamed.ParentID != nil && *renamed.ParentID != *info.ParentID) {
+				t.Errorf("ParentID = %v, want %v", renamed.ParentID, info.ParentID)
+			}
+		})
+	}
+}
+
+// A rename by anyone but the bridge itself has to be remembered, or the next
+// thing that reasserts the portal's description takes it away again.
+func TestHandleMatrixRoomNameRecordsTheUsersName(t *testing.T) {
+	var sc SIPClient
+	portal := portalFor("home-+15551234567")
+	changed, err := sc.HandleMatrixRoomName(context.Background(), &bridgev2.MatrixRoomName{
+		MatrixEventBase: bridgev2.MatrixEventBase[*event.RoomNameEventContent]{
+			Portal:  portal,
+			Content: &event.RoomNameEventContent{Name: "Plumber"},
+		},
+	})
+	if err != nil || !changed {
+		t.Fatalf("HandleMatrixRoomName = %v, %v, want true, nil", changed, err)
+	}
+	if portal.Name != "Plumber" || !portal.NameSet {
+		t.Errorf("portal name = %q, set = %v", portal.Name, portal.NameSet)
+	}
+	if !portalMeta(portal).NameSetByUser {
+		t.Error("the rename was not recorded, so the next resync will overwrite it")
+	}
+	info, err := sc.GetChatInfo(context.Background(), portal)
+	if err != nil {
+		t.Fatalf("GetChatInfo: %v", err)
+	}
+	if info.Name != nil {
+		t.Errorf("the very next description still names the room %q", *info.Name)
+	}
+}
+
+// Element's rename dialog can submit an empty name, and it has to mean "give
+// the bridge's name back" rather than a room left nameless forever.
+func TestEmptyRoomNameResetsToTheBridgeName(t *testing.T) {
+	for _, tc := range []struct{ portalID, want string }{
+		{"home-+15551234567", "+15551234567 (home)"},
+		{"home-space", "home"},
+	} {
+		t.Run(tc.portalID, func(t *testing.T) {
+			var sc SIPClient
+			portal := renamedPortal(tc.portalID)
+			portal.Name = "Plumber"
+			portal.NameSet = true
+			changed, err := sc.HandleMatrixRoomName(context.Background(), &bridgev2.MatrixRoomName{
+				MatrixEventBase: bridgev2.MatrixEventBase[*event.RoomNameEventContent]{
+					Portal:  portal,
+					Content: &event.RoomNameEventContent{Name: ""},
+				},
+			})
+			if err != nil || !changed {
+				t.Fatalf("HandleMatrixRoomName = %v, %v, want true, nil", changed, err)
+			}
+			if portalMeta(portal).NameSetByUser {
+				t.Error("the portal is still marked as the user's, so the name never comes back")
+			}
+			if portal.Name != tc.want {
+				t.Errorf("portal name = %q, want the bridge's %q", portal.Name, tc.want)
+			}
+			// NameSet false is what makes the resync re-send a name the portal
+			// already records: updateName early-returns otherwise.
+			if portal.NameSet {
+				t.Error("NameSet is still true, so the room keeps the empty name")
+			}
+			info, err := sc.GetChatInfo(context.Background(), portal)
+			if err != nil {
+				t.Fatalf("GetChatInfo: %v", err)
+			}
+			if info.Name == nil || *info.Name != tc.want {
+				t.Errorf("name = %v, want the bridge's %q again", info.Name, tc.want)
+			}
+		})
+	}
+}
+
+// The room needs two unrelated grants: the call membership, without which
+// there is no call button, and m.room.name, without which there is no rename.
+// Neither must cost the other.
+func TestPortalPowerLevelsAllowBothCallsAndRenaming(t *testing.T) {
+	levels := portalEventPowerLevels()
+	if level, ok := levels[event.StateRoomName]; !ok || level != 0 {
+		t.Errorf("m.room.name = %v (present: %v), want 0", level, ok)
+	}
+	for evtType := range calls.MembershipPowerLevels() {
+		if level, ok := levels[evtType]; !ok || level != 0 {
+			t.Errorf("%s = %v (present: %v), want 0", evtType.Type, level, ok)
+		}
+	}
+	var sc SIPClient
+	info, err := sc.GetChatInfo(context.Background(), portalFor("home-+15551234567"))
+	if err != nil {
+		t.Fatalf("GetChatInfo: %v", err)
+	}
+	if info.Members.PowerLevels == nil {
+		t.Fatal("the portal grants no power levels at all")
+	}
+	if got := info.Members.PowerLevels.Events[event.StateRoomName]; got != 0 {
+		t.Errorf("the portal grants m.room.name %d, want 0", got)
+	}
+}
+
+// The flag rides in bridgev2's portal.metadata column, so it survives a
+// restart only if it round-trips through JSON under a stable key.
+func TestPortalMetadataRoundTripsThroughJSON(t *testing.T) {
+	raw, err := json.Marshal(&PortalMetadata{NameSetByUser: true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var meta PortalMetadata
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatalf("unmarshal %s: %v", raw, err)
+	}
+	if !meta.NameSetByUser {
+		t.Errorf("name_set_by_user did not survive %s", raw)
+	}
+	// An empty metadata object is what every portal created before this flag
+	// existed has, and it must read as "the bridge still owns the name".
+	var old PortalMetadata
+	if err := json.Unmarshal([]byte(`{}`), &old); err != nil {
+		t.Fatalf("unmarshal empty: %v", err)
+	}
+	if old.NameSetByUser {
+		t.Error("an empty metadata object read as a user rename")
 	}
 }
