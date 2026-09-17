@@ -1,4 +1,5 @@
-BINARY := matrix-sip-bridge
+BINARY    := matrix-sip-bridge
+CALLAUDIT := callaudit
 PKG    := github.com/lhns/matrix-sip-bridge
 # goolm selects mautrix's pure-Go Olm implementation; the default CGO build
 # wants libolm headers. CGO cannot be disabled: mxmain imports go-sqlite3.
@@ -14,10 +15,15 @@ LDFLAGS := -s -w \
 	-X main.Commit=$(COMMIT) \
 	-X main.BuildTime=$(BUILD_TIME)
 
-.PHONY: build test lint clean
+.PHONY: build callaudit test lint clean
 
-build:
+build: callaudit
 	go build $(GOFLAGS) -ldflags="$(LDFLAGS)" -o $(BINARY) .
+
+# The audio check. No version stamping: it has no -version flag to carry it,
+# and it is built here so that `make build` cannot leave it uncompiled.
+callaudit:
+	go build $(GOFLAGS) -o $(CALLAUDIT) ./cmd/callaudit
 
 test:
 	go test -tags $(TAGS) ./... -count=1
@@ -27,4 +33,4 @@ lint:
 	golangci-lint run --build-tags $(TAGS) ./...
 
 clean:
-	rm -f $(BINARY) $(BINARY).exe
+	rm -f $(BINARY) $(BINARY).exe $(CALLAUDIT) $(CALLAUDIT).exe

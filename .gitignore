@@ -1,6 +1,9 @@
 # Binaries
 matrix-sip-bridge
 matrix-sip-bridge.exe
+# Anchored: an unanchored "callaudit" would also ignore cmd/callaudit and
+# pkg/callaudit, i.e. the source of the thing being built.
+/callaudit
 *.exe
 *.so
 *.dylib
