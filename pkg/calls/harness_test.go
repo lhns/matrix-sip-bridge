@@ -149,6 +149,11 @@ type fakeMatrix struct {
 	portalErr error
 	members   map[id.UserID]*event.MemberEventContent
 
+	// portalIDs is what already exists on the bridge, which is what a !dial
+	// with no line resolves against.
+	portalIDs  []string
+	portalsErr error
+
 	// asked records the portal IDs PortalRoom was called with. It is the only
 	// place a dial entry point's ID arithmetic is visible, the portal itself
 	// being fixed.
@@ -187,6 +192,13 @@ func (f *fakeMatrix) portalsAsked() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.asked...)
+}
+
+func (f *fakeMatrix) PortalIDs(context.Context) ([]string, error) {
+	if f.portalsErr != nil {
+		return nil, f.portalsErr
+	}
+	return f.portalIDs, nil
 }
 
 func (f *fakeMatrix) PortalByMXID(_ context.Context, roomID id.RoomID) (Portal, bool) {

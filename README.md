@@ -516,7 +516,7 @@ cmd/callaudit/             the end-to-end audio check: a livekit-sip log in, a v
 pkg/connector/             bridgev2 NetworkConnector and NetworkAPI (messaging)
   connector.go               lifecycle, static login, event-processor wiring
   client.go                  inbound and outbound SIP MESSAGE
-  commands.go                !dial, for numbers with no portal room yet
+  commands.go                !dial, resolving a number to the portal it has
   config.go                  network config struct and upgrader
   health.go                  the two faults a call needs, as one bridge state
   readiness.go               the /_health/ready endpoint the k8s probe uses

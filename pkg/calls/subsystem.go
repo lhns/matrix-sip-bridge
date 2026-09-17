@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1218,6 +1219,20 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal, caller id.UserID, o
 	return call, nil
 }
 
+// AmbiguousNumberError is returned for a number dialled with no line that
+// already has a room on more than one line: there is no single portal to
+// resolve it to, and guessing would put the call in the wrong conversation.
+// Lines names them, sorted.
+type AmbiguousNumberError struct {
+	Number string
+	Lines  []string
+}
+
+func (e *AmbiguousNumberError) Error() string {
+	return fmt.Sprintf("%s already has a room on each of the lines %s, so there is no one portal to dial",
+		e.Number, strings.Join(e.Lines, ", "))
+}
+
 // DialNumber resolves a number to its portal and calls it, on behalf of the
 // Matrix user who asked.
 //
@@ -1228,7 +1243,7 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal, caller id.UserID, o
 // refuse. Silently dropping it would put the call in a different portal from
 // the one that line's inbound calls land in.
 func (s *Subsystem) DialNumber(ctx context.Context, number, line string, caller id.UserID) (*database.Call, error) {
-	portalID, err := phonenum.IDFor(line, number)
+	portalID, err := s.dialPortalID(ctx, number, line)
 	if err != nil {
 		return nil, err
 	}
@@ -1237,6 +1252,59 @@ func (s *Subsystem) DialNumber(ctx context.Context, number, line string, caller 
 		return nil, err
 	}
 	return s.Dial(ctx, portal, caller)
+}
+
+// dialPortalID is the portal a typed number dials into.
+//
+// A named line spells the composite key, exactly as an inbound call on that
+// line spells it. With no line the number's *existing* portal is used instead:
+// a line-less key would be a second room for someone the user already talks to
+// on a line, which is what ADR-0014 left open and what this resolves. The
+// line-less key is only minted for a number that has no room at all.
+func (s *Subsystem) dialPortalID(ctx context.Context, number, line string) (string, error) {
+	if line != "" {
+		return phonenum.IDFor(line, number)
+	}
+	e164, err := phonenum.Normalize(number)
+	if err != nil {
+		return "", err
+	}
+	ids, err := s.mx.PortalIDs(ctx)
+	if err != nil {
+		// Never fall back to the line-less key on a failed lookup: that mints
+		// the duplicate room this resolution exists to prevent.
+		return "", fmt.Errorf("look up the existing portals for %s: %w", e164, err)
+	}
+	return portalIDForNumber(e164, ids)
+}
+
+// portalIDForNumber picks which of the portals that exist a bare number dials.
+//
+// Candidates are matched on their number half as NumberFromID spells it per ID
+// form, so neither a short line-scoped number, nor a number that is another's
+// suffix, nor a line name ending in a digit can be mistaken for a match. One
+// line-scoped portal beats a line-less one, which consolidates future calls
+// onto the room that line's inbound calls land in; the line-less room simply
+// stops receiving. Nothing is re-keyed or removed either way.
+func portalIDForNumber(e164 string, existing []string) (string, error) {
+	var onLines []string
+	for _, portalID := range existing {
+		if phonenum.NumberFromID(portalID) == e164 && phonenum.LineFromID(portalID) != "" {
+			onLines = append(onLines, portalID)
+		}
+	}
+	switch len(onLines) {
+	case 0:
+		return phonenum.ToID(e164), nil
+	case 1:
+		return onLines[0], nil
+	}
+	lines := make([]string, 0, len(onLines))
+	for _, portalID := range onLines {
+		lines = append(lines, phonenum.LineFromID(portalID))
+	}
+	slices.Sort(lines)
+	return "", &AmbiguousNumberError{Number: e164, Lines: lines}
 }
 
 // runParticipantWatcher is how the bridge learns that a call has ended.

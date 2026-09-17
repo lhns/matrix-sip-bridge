@@ -71,10 +71,14 @@ be trusted to remember.
   and therefore lands in that line's portal instead. Giving the bridge a
   default line would be exactly the routing knowledge this ADR keeps out of it,
   so the line is asked for instead: `!dial <number> <line>` spells the
-  composite key and is the only way a typed number reaches the portal that
-  line's inbound calls land in. The name is checked for being readable back out
-  of the ID and for nothing else; an unroutable one is the SIP server's to
-  refuse, and is never dropped in favour of the line-less portal.
+  composite key, and is what a number with rooms on several lines needs. The
+  name is checked for being readable back out of the ID and for nothing else;
+  an unroutable one is the SIP server's to refuse, and is never dropped in
+  favour of the line-less portal. `!dial` with no line resolves the number to
+  the portal it already has -- the line-scoped one where both exist -- rather
+  than minting the line-less key, which was a second room for a person the
+  user was already talking to on a line. Only a number with no room at all
+  keys line-lessly, and nothing is ever re-keyed.
 - An inbound SIP MESSAGE carries its line in the host of the `From` URI, where
   the SIP server writes it in place of the carrier's own host, so a text and a
   call from the same person on the same line share one portal and one ghost.

@@ -58,6 +58,11 @@ type matrixSide interface {
 	// it does not exist yet and repairing an older one that predates the
 	// call-capable power levels.
 	PortalRoom(ctx context.Context, portalID string) (Portal, error)
+	// PortalIDs lists the IDs of the portals that already have a Matrix room.
+	// bridgev2 has no number -> portal index, so a number is resolved to the
+	// lines it is already a conversation on by reading them all; see
+	// portalIDForNumber.
+	PortalIDs(ctx context.Context) ([]string, error)
 	// PortalByMXID maps a Matrix room back to the portal it is, reporting
 	// false for a room that is not one.
 	PortalByMXID(ctx context.Context, roomID id.RoomID) (Portal, bool)
@@ -125,6 +130,22 @@ func (b *bridgeSide) PortalRoom(ctx context.Context, portalID string) (Portal, e
 	// rechecks the user's membership.
 	b.ensureUserInPortal(ctx, portal, source)
 	return Portal{ID: string(portal.ID), MXID: portal.MXID}, nil
+}
+
+// PortalIDs reads every portal because bridgev2 indexes portals by key and by
+// MXID and by nothing else. Rows with no room are left out: a key with no room
+// is not a conversation to consolidate onto, and dialling it would create the
+// room anyway.
+func (b *bridgeSide) PortalIDs(ctx context.Context) ([]string, error) {
+	portals, err := b.br.DB.Portal.GetAllWithMXID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list portals: %w", err)
+	}
+	ids := make([]string, 0, len(portals))
+	for _, portal := range portals {
+		ids = append(ids, string(portal.ID))
+	}
+	return ids, nil
 }
 
 func (b *bridgeSide) PortalByMXID(ctx context.Context, roomID id.RoomID) (Portal, bool) {

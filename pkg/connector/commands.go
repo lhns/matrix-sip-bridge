@@ -6,6 +6,7 @@ import (
 
 	"maunium.net/go/mautrix/bridgev2/commands"
 
+	"github.com/lhns/matrix-sip-bridge/pkg/calls"
 	"github.com/lhns/matrix-sip-bridge/pkg/phonenum"
 )
 
@@ -30,13 +31,18 @@ func (sc *SIPConnector) dialCommand() *commands.FullHandler {
 		Func: func(ce *commands.Event) {
 			if strings.TrimSpace(ce.RawArgs) == "" {
 				ce.Reply("Usage: `$cmdprefix dial <phone number> [line]`, the number in international " +
-					"format, e.g. `+15551234567 home`. Without a line the call gets the number's " +
-					"line-less room, not the one that line's inbound calls land in.")
+					"format, e.g. `+15551234567 home`. Without a line the call joins the room the " +
+					"number already has; a line is needed for a number with rooms on several.")
 				return
 			}
 			number, line := splitDialArgs(ce.RawArgs)
 			call, err := sc.calls.DialNumber(ce.Ctx, number, line, ce.User.MXID)
+			var ambiguous *calls.AmbiguousNumberError
 			switch {
+			case errors.As(err, &ambiguous):
+				ce.Reply("%s already has a room on the lines `%s`. Say which one: "+
+					"`$cmdprefix dial %s <line>`.",
+					ambiguous.Number, strings.Join(ambiguous.Lines, "`, `"), ambiguous.Number)
 			case errors.Is(err, phonenum.ErrBadLine):
 				// Never fall back to a line-less call: that is a different
 				// portal room, and the user asked for this line.

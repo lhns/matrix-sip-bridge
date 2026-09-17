@@ -449,6 +449,103 @@ func TestDialNumberRefusesAnUnusableLine(t *testing.T) {
 	}
 }
 
+// !dial with no line has to land in the room the number already has. Minting
+// the line-less key instead opened a second room for someone the user was
+// already talking to on a line.
+func TestDialNumberWithNoLineResolvesTheExistingPortal(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing []string
+		number   string
+		want     string
+	}{
+		{"no portal at all mints the line-less key", nil, "+15551234567", "15551234567"},
+		{"the one portal is line-scoped", []string{"home-+15551234567"}, "+15551234567", "home-+15551234567"},
+		{"the one portal is line-less", []string{"15551234567"}, "+15551234567", "15551234567"},
+		{"a line-scoped portal beats the line-less one",
+			[]string{"15551234567", "home-+15551234567"}, "+15551234567", "home-+15551234567"},
+		{"another number's portal is not this number's",
+			[]string{"home-+15559876543"}, "+15551234567", "15551234567"},
+		// A short number only means something on its line, and is not the
+		// E.164 number that happens to have the same digits.
+		{"a short number on a line is not E.164", []string{"office-1001"}, "+1001", "1001"},
+		// Both directions of the suffix trap a LIKE '%-' || number match falls
+		// into.
+		{"a shorter number is not a suffix match",
+			[]string{"home-+5551234567"}, "+15551234567", "15551234567"},
+		{"a longer number is not a suffix match",
+			[]string{"home-+15551234567"}, "+5551234567", "5551234567"},
+		{"a line name ending in a digit", []string{"line2-+15551234567"}, "+15551234567", "line2-+15551234567"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.mx.portalIDs = tt.existing
+			if _, err := h.DialNumber(t.Context(), tt.number, "", testCaller); err != nil {
+				t.Fatalf("DialNumber: %v", err)
+			}
+			if got := h.mx.portalsAsked(); len(got) != 1 || got[0] != tt.want {
+				t.Errorf("the portal asked for was %v, want [%q]", got, tt.want)
+			}
+		})
+	}
+}
+
+// Guessing a line would put the call in one of two real conversations at
+// random, and the line-less key would be the duplicate room this resolution
+// exists to prevent. Neither is better than asking.
+func TestDialNumberRefusesAnAmbiguousNumber(t *testing.T) {
+	h := newHarness(t)
+	h.mx.portalIDs = []string{"work-+15551234567", "15551234567", "home-+15551234567"}
+
+	_, err := h.DialNumber(t.Context(), "+15551234567", "", testCaller)
+	var ambiguous *AmbiguousNumberError
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("DialNumber = %v, want AmbiguousNumberError", err)
+	}
+	if !slices.Equal(ambiguous.Lines, []string{"home", "work"}) {
+		t.Errorf("Lines = %v, want both lines, sorted", ambiguous.Lines)
+	}
+	if ambiguous.Number != "+15551234567" {
+		t.Errorf("Number = %q, want the number as dialled", ambiguous.Number)
+	}
+	if got := h.mx.portalsAsked(); len(got) != 0 {
+		t.Errorf("a portal was looked up anyway: %v", got)
+	}
+	if len(h.sip.invites) != 0 {
+		t.Errorf("an INVITE went out anyway: %v", h.sip.invites)
+	}
+}
+
+// A lookup that failed says nothing about which rooms exist, so the line-less
+// key is not a safe default: it is how the duplicate gets minted.
+func TestDialNumberDoesNotFallBackWhenTheLookupFails(t *testing.T) {
+	h := newHarness(t)
+	h.mx.portalsErr = errors.New("database is down")
+
+	if _, err := h.DialNumber(t.Context(), "+15551234567", "", testCaller); err == nil {
+		t.Fatal("DialNumber succeeded despite the portal lookup failing")
+	}
+	if got := h.mx.portalsAsked(); len(got) != 0 {
+		t.Errorf("a portal was looked up anyway: %v", got)
+	}
+}
+
+// A named line is routing the user asked for, and is spelled into the key
+// without reading what exists -- including for a number that is ambiguous
+// without one.
+func TestDialNumberWithALineIgnoresWhatExists(t *testing.T) {
+	h := newHarness(t)
+	h.mx.portalIDs = []string{"home-+15551234567", "work-+15551234567"}
+
+	if _, err := h.DialNumber(t.Context(), "+15551234567", "mobile", testCaller); err != nil {
+		t.Fatalf("DialNumber: %v", err)
+	}
+	if got := h.mx.portalsAsked(); len(got) != 1 || got[0] != "mobile-+15551234567" {
+		t.Errorf("the portal asked for was %v, want [%q]", got, "mobile-+15551234567")
+	}
+}
+
 // The bridge had to publish the membership before CreateSIPParticipant -- it
 // is what the Matrix side joins -- so a client that read it then resolved a
 // LiveKit identity that was not in the room yet, and nothing later told it to
