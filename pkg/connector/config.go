@@ -19,6 +19,11 @@ type Config struct {
 	SIP      siptransport.Config `yaml:"sip"`
 	Messages MessageConfig       `yaml:"messages"`
 	Calls    calls.Config        `yaml:"calls"`
+	// LineSpaces puts every portal on a line into a Matrix space named after
+	// the line. Beside the protocol sections rather than in one of them
+	// because it is room organisation, shared by both halves. Off stops new
+	// parents being named and nothing else -- see GetChatInfo.
+	LineSpaces bool `yaml:"line_spaces"`
 }
 
 // MessageConfig is the text-messaging half.
@@ -47,6 +52,10 @@ const LoginID = "sip"
 const LoginFlowID = "sip"
 
 func upgradeConfig(helper configupgrade.Helper) {
+	// Absent from an old config, Copy leaves the example config's true in
+	// place: the upgrade must not turn spaces off under a running deployment.
+	helper.Copy(configupgrade.Bool, "line_spaces")
+
 	helper.Copy(configupgrade.Str, "sip", "listen")
 	helper.Copy(configupgrade.Str, "sip", "transport")
 	helper.Copy(configupgrade.Str, "sip", "public_address")

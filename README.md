@@ -38,8 +38,9 @@ membership into an encrypted room. See
 
 ## One Matrix space per line
 
-Each portal room names its line's space as its parent, so a line's rooms are
-grouped under a space named after the line — `home-+15551234567` sits in
+On by default, as `network.line_spaces`. Each portal room names its line's
+space as its parent, so a line's rooms are grouped under a space named after
+the line — `home-+15551234567` sits in
 `home`. The spaces are portals too, created by the bridge the first time a room
 on that line needs one; their IDs are `<line>-space`, which cannot be read as a
 number and is refused by every path that dials or texts. A portal with no line
@@ -48,6 +49,12 @@ and stays where it is. With `bridge.personal_filtering_spaces` on, the line
 spaces are added to that space too, and a new portal room goes only into its
 line's space — but a room already listed in the personal space keeps that
 entry, so it appears in both.
+
+`line_spaces: false` stops new rooms naming a parent. It does not undo
+anything: the space rooms, their `m.space.child` entries and the rooms already
+in them stay as they are, and a portal that is already a space is still
+described as one — bridgev2 refuses to change a room into or out of a space, so
+describing it as a number's DM would leave a DM room acting as a parent.
 
 ## Renaming a portal room
 

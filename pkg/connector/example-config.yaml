@@ -1,3 +1,8 @@
+# Group every portal room on a line into a Matrix space named after the line.
+# Turning this off stops new rooms being put in a space; it does not remove the
+# spaces or the rooms already in them, and a space room keeps working as one.
+line_spaces: true
+
 # The bridge as a SIP endpoint. It is a user agent the SIP server dials, not a
 # remote control for one PBX: call policy stays in the server's own routing.
 sip:
