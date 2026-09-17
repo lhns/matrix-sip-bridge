@@ -49,6 +49,19 @@ spaces are added to that space too, and a new portal room goes only into its
 line's space — but a room already listed in the personal space keeps that
 entry, so it appears in both.
 
+## Renaming a portal room
+
+A portal room is named after its number (and line), and a line's space after
+the line, but the name is the user's to change: the portal grants
+`m.room.name` to everyone, and a rename by anyone other than the bridge is
+recorded on the portal and never reasserted over. Clearing the name in the
+client is the way back — that is read as "use the bridge's name again", not as
+a room with no name.
+
+A room the bridge replaces after a tombstone starts nameless rather than with
+the wrong name, and a rename made before this shipped is not adopted: rename
+it once more to have it remembered.
+
 ## SIP server contract
 
 This is the authoritative spec for the other side of the interface. The
