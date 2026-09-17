@@ -219,3 +219,60 @@ func TestLineFromURIDoesNotDisturbTheNumber(t *testing.T) {
 		}
 	}
 }
+
+// A space portal ID shares the portal ID space with the numbers, so it has to
+// be unreadable as one -- for every line name, including the ones that end in
+// a digit -- and unreachable from IDFor.
+func TestSpaceIDCannotBeReadAsANumber(t *testing.T) {
+	for _, line := range []string{"home", "office-main", "line2", "line-2", "2"} {
+		t.Run(line, func(t *testing.T) {
+			id, err := SpaceIDFor(line)
+			if err != nil {
+				t.Fatalf("SpaceIDFor(%q): %v", line, err)
+			}
+			if got := LineFromSpaceID(id); got != line {
+				t.Errorf("LineFromSpaceID(%q) = %q, want %q", id, got, line)
+			}
+			if !IsSpaceID(id) {
+				t.Errorf("IsSpaceID(%q) is false", id)
+			}
+			// The trap: portalIDLine anchors on trailing digits, so a shape
+			// ending in the line name would read "line-2-…" as the number 2.
+			if gotLine, number := SplitID(id); gotLine != "" || number != id {
+				t.Errorf("SplitID(%q) = (%q, %q), want the ID whole with no line", id, gotLine, number)
+			}
+		})
+	}
+}
+
+// Two lines are two spaces; nothing IDFor produces is one.
+func TestSpaceIDsDoNotCollideWithPortalIDs(t *testing.T) {
+	home, _ := SpaceIDFor("home")
+	work, _ := SpaceIDFor("work")
+	if home == work {
+		t.Fatalf("both lines share the space ID %q", home)
+	}
+	for _, line := range []string{"", "home", "office-main"} {
+		id, err := IDFor(line, "+15551234567")
+		if err != nil {
+			t.Fatalf("IDFor(%q): %v", line, err)
+		}
+		if IsSpaceID(id) {
+			t.Errorf("the portal ID %q reads as a space", id)
+		}
+	}
+	// A short line-scoped number is not a space either.
+	if IsSpaceID("office-1001") || IsSpaceID("15551234567") {
+		t.Error("a number portal ID read as a space")
+	}
+}
+
+// A line the bridge cannot spell into a portal ID gets no space, for the same
+// reason MakeID refuses it: the space would belong to a different line.
+func TestSpaceIDForRefusesABadLine(t *testing.T) {
+	for _, line := range []string{"", "not a line", "sip.example.com"} {
+		if got, err := SpaceIDFor(line); !errors.Is(err, ErrBadLine) {
+			t.Errorf("SpaceIDFor(%q) = (%q, %v), want ErrBadLine", line, got, err)
+		}
+	}
+}

@@ -66,7 +66,7 @@ func (sc *SIPClient) resyncPortals(ctx context.Context) {
 		// there" cache is in memory, so every restart re-invites the user to
 		// every room they have left. A room they are not in needs no room-type
 		// repair anyway.
-		if !shouldResyncPortal(ctx, br.Matrix, portal.MXID, sc.UserLogin.UserMXID, &log) {
+		if !shouldResyncPortal(ctx, br.Matrix, portal, sc.UserLogin.UserMXID, &log) {
 			continue
 		}
 		br.QueueRemoteEvent(sc.UserLogin, &simplevent.ChatResync{
@@ -91,12 +91,18 @@ type memberLister interface {
 // This covers the restart path only. A real inbound call or text still
 // re-invites the user to a room they left, which is wanted: otherwise they
 // would silently miss it.
-func shouldResyncPortal(ctx context.Context, mx memberLister, roomID id.RoomID, userID id.UserID, log *zerolog.Logger) bool {
-	members, err := mx.GetMembers(ctx, roomID)
+func shouldResyncPortal(ctx context.Context, mx memberLister, portal *bridgev2.Portal, userID id.UserID, log *zerolog.Logger) bool {
+	// A line's space has no room type to repair -- bridgev2 refuses to change
+	// one into or out of a space anyway -- and no members to sync. Its
+	// children name it as their parent on their own resync.
+	if portal.RoomType == database.RoomTypeSpace {
+		return false
+	}
+	members, err := mx.GetMembers(ctx, portal.MXID)
 	if err != nil {
 		// Resync anyway. Skipping on a failed lookup would quietly stop the
 		// room-type repair this function exists to do.
-		log.Warn().Err(err).Stringer("room_id", roomID).
+		log.Warn().Err(err).Stringer("room_id", portal.MXID).
 			Msg("Could not read portal membership; resyncing it regardless")
 		return true
 	}
@@ -114,15 +120,25 @@ func (sc *SIPClient) LogoutRemote(_ context.Context) {}
 // appears as a ghost. The trunk's own number is config, not an identity.
 func (sc *SIPClient) IsThisUser(_ context.Context, _ networkid.UserID) bool { return false }
 
-func (sc *SIPClient) GetCapabilities(_ context.Context, _ *bridgev2.Portal) *event.RoomFeatures {
+func (sc *SIPClient) GetCapabilities(_ context.Context, portal *bridgev2.Portal) *event.RoomFeatures {
+	// A line's space holds rooms and carries no messages of its own.
+	// HandleMatrixMessage refuses one regardless; this is what a client is
+	// told beforehand.
+	if phonenum.IsSpaceID(string(portal.ID)) {
+		return &event.RoomFeatures{}
+	}
 	return &event.RoomFeatures{
 		MaxTextLength: sc.conn.Config.Messages.MaxLength,
 	}
 }
 
-// GetChatInfo describes a portal: the Matrix user and the one phone number.
+// GetChatInfo describes a portal: the Matrix user and the one phone number,
+// or -- for the one portal per line that is a space -- the line itself.
 func (sc *SIPClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
-	return &bridgev2.ChatInfo{
+	if line := phonenum.LineFromSpaceID(string(portal.ID)); line != "" {
+		return spaceChatInfo(line), nil
+	}
+	info := &bridgev2.ChatInfo{
 		Name: ptr.Ptr(portalName(string(portal.ID))),
 		// A portal is one phone number and is inherently two-party. The room
 		// type is what puts is_direct on the invite and the room in the user's
@@ -151,7 +167,29 @@ func (sc *SIPClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (*b
 				Events: calls.MembershipPowerLevels(),
 			},
 		},
-	}, nil
+	}
+	// The line's space, which bridgev2 creates as a parent portal if it does
+	// not exist yet. A portal with no line stays parentless: there is no
+	// default line, and a nil ParentID leaves the parent alone where an empty
+	// one would unparent the room.
+	if space, err := phonenum.SpaceIDFor(phonenum.LineFromID(string(portal.ID))); err == nil {
+		info.ParentID = ptr.Ptr(networkid.PortalID(space))
+	}
+	return info, nil
+}
+
+// spaceChatInfo describes a line's space, the parent every portal on that
+// line names. A space is not a conversation: no ghost member, and not a DM,
+// which would put is_direct on a room with nobody in it.
+func spaceChatInfo(line string) *bridgev2.ChatInfo {
+	return &bridgev2.ChatInfo{
+		Name: ptr.Ptr(line),
+		Type: ptr.Ptr(database.RoomTypeSpace),
+		// Members stays nil: bridgev2 reads that as "the network said
+		// nothing" and joins the owning user's double puppet, where a list
+		// would be a membership sync over a room the SIP side knows nothing
+		// about.
+	}
 }
 
 // portalName names the room after the number, and after the line too when the
@@ -215,6 +253,11 @@ func (sc *SIPClient) ResolveIdentifier(ctx context.Context, identifier string, _
 
 // HandleMatrixMessage sends a Matrix message out as a SIP MESSAGE.
 func (sc *SIPClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
+	// A line's space is room organisation: its ID has no number half, so
+	// NumberFromID would address the text to "+<line>-space".
+	if phonenum.IsSpaceID(string(msg.Portal.ID)) {
+		return nil, fmt.Errorf("a line's space carries no messages")
+	}
 	if !sc.conn.Config.Messages.Enabled {
 		return nil, fmt.Errorf("messaging is disabled")
 	}

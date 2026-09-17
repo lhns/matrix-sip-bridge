@@ -320,6 +320,17 @@ func (s *Subsystem) HandleInboundCall(ctx context.Context, leg InboundLeg) {
 		_ = leg.Reject(404, "Not Found")
 		return
 	}
+	// The conference header is the only thing that names the portal, and it
+	// comes off the wire: a header naming a line's space would put a call in
+	// the room that organises that line's rooms.
+	if phonenum.IsSpaceID(portalID) {
+		s.log.Warn().
+			Str("conference", conference).
+			Str("from", leg.From()).
+			Msg("INVITE naming a line's space rather than a number, declining")
+		_ = leg.Reject(404, "Not Found")
+		return
+	}
 	log := s.log.With().Str("portal_id", portalID).Logger()
 
 	// The 180 goes out before the setup below, not after it: until a
@@ -1108,6 +1119,11 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal, caller id.UserID, o
 		return nil, fmt.Errorf("call bridging is disabled")
 	}
 	portalID := portal.ID
+	// A line's space has no number half to dial. This covers both callers:
+	// the !dial command and an RTC membership appearing in the room.
+	if phonenum.IsSpaceID(portalID) {
+		return nil, fmt.Errorf("portal %s is a line's space, not a number", portalID)
+	}
 	if portal.MXID == "" {
 		return nil, fmt.Errorf("portal %s has no Matrix room", portalID)
 	}
@@ -1289,6 +1305,11 @@ func (s *Subsystem) dialPortalID(ctx context.Context, number, line string) (stri
 func portalIDForNumber(e164 string, existing []string) (string, error) {
 	var onLines []string
 	for _, portalID := range existing {
+		// The portal list includes the per-line spaces, which are rooms and
+		// not conversations.
+		if phonenum.IsSpaceID(portalID) {
+			continue
+		}
 		if phonenum.NumberFromID(portalID) == e164 && phonenum.LineFromID(portalID) != "" {
 			onLines = append(onLines, portalID)
 		}

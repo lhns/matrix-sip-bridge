@@ -36,6 +36,19 @@ silent** — no error appears on either side. Leave `encryption.default` and
 membership into an encrypted room. See
 [ADR-0010](docs/adr/0010-element-call-filters-audio-by-rtc-membership.md).
 
+## One Matrix space per line
+
+Each portal room names its line's space as its parent, so a line's rooms are
+grouped under a space named after the line — `home-+15551234567` sits in
+`home`. The spaces are portals too, created by the bridge the first time a room
+on that line needs one; their IDs are `<line>-space`, which cannot be read as a
+number and is refused by every path that dials or texts. A portal with no line
+(from before lines, or an inbound text whose host named no line) has no space
+and stays where it is. With `bridge.personal_filtering_spaces` on, the line
+spaces are added to that space too, and a new portal room goes only into its
+line's space — but a room already listed in the personal space keeps that
+entry, so it appears in both.
+
 ## SIP server contract
 
 This is the authoritative spec for the other side of the interface. The

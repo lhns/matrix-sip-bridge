@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // portalIDLine splits a composite portal ID into its line and its number.
@@ -135,4 +136,42 @@ func LineFromURI(uri string) string {
 		return ""
 	}
 	return host
+}
+
+// spaceIDSuffix marks a portal ID as the Matrix space holding a line's rooms
+// rather than a conversation with a number.
+//
+// It must not end in digits: portalIDLine anchors on a trailing run of digits,
+// so an ID ending in a letter cannot be read as a number whatever the line is
+// called -- a bare "space:<line>" would be ambiguous for a line named
+// "line-2". Every ID IDFor produces ends in a digit, so the two ID spaces
+// cannot overlap.
+const spaceIDSuffix = "-space"
+
+// SpaceIDFor is the portal ID of the space that holds a line's portal rooms.
+//
+// The line is checked as MakeID checks it: a name that cannot be spelled into
+// a portal ID gets no space at all rather than a mis-keyed one.
+func SpaceIDFor(line string) (string, error) {
+	if !lineName.MatchString(line) {
+		return "", fmt.Errorf("%w: %q", ErrBadLine, line)
+	}
+	return line + spaceIDSuffix, nil
+}
+
+// LineFromSpaceID is the line a space portal ID names, empty for an ID that is
+// not one.
+func LineFromSpaceID(id string) string {
+	line, ok := strings.CutSuffix(id, spaceIDSuffix)
+	if !ok || !lineName.MatchString(line) {
+		return ""
+	}
+	return line
+}
+
+// IsSpaceID reports whether a portal ID names a line's space. A space is room
+// organisation, not a conversation: it must never be dialled, texted, or
+// turned into a number.
+func IsSpaceID(id string) bool {
+	return LineFromSpaceID(id) != ""
 }

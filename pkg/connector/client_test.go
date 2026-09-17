@@ -363,54 +363,188 @@ func (f *fakeMemberLister) GetMembers(context.Context, id.RoomID) (map[id.UserID
 func TestShouldResyncPortal(t *testing.T) {
 	const user = id.UserID("@alice:example.com")
 	for _, tc := range []struct {
-		name    string
-		members map[id.UserID]*event.MemberEventContent
-		err     error
-		want    bool
+		name     string
+		members  map[id.UserID]*event.MemberEventContent
+		err      error
+		roomType database.RoomType
+		want     bool
+		// wantLookups is how often the membership was read: a space is
+		// skipped before that costs a request.
+		wantLookups int
 	}{
 		{
-			name:    "joined",
-			members: map[id.UserID]*event.MemberEventContent{user: {Membership: event.MembershipJoin}},
-			want:    true,
+			name:        "joined",
+			members:     map[id.UserID]*event.MemberEventContent{user: {Membership: event.MembershipJoin}},
+			want:        true,
+			wantLookups: 1,
 		},
 		{
-			name:    "invited",
-			members: map[id.UserID]*event.MemberEventContent{user: {Membership: event.MembershipInvite}},
-			want:    true,
+			// A space has no room type to repair and no members to sync, and
+			// resyncing it only re-invites the user to it.
+			name:        "a line's space is not resynced",
+			members:     map[id.UserID]*event.MemberEventContent{user: {Membership: event.MembershipJoin}},
+			roomType:    database.RoomTypeSpace,
+			want:        false,
+			wantLookups: 0,
 		},
 		{
-			name:    "left",
-			members: map[id.UserID]*event.MemberEventContent{user: {Membership: event.MembershipLeave}},
-			want:    false,
+			name:        "invited",
+			members:     map[id.UserID]*event.MemberEventContent{user: {Membership: event.MembershipInvite}},
+			want:        true,
+			wantLookups: 1,
 		},
 		{
-			name:    "banned",
-			members: map[id.UserID]*event.MemberEventContent{user: {Membership: event.MembershipBan}},
-			want:    false,
+			name:        "left",
+			members:     map[id.UserID]*event.MemberEventContent{user: {Membership: event.MembershipLeave}},
+			want:        false,
+			wantLookups: 1,
 		},
 		{
-			name:    "no member event",
-			members: map[id.UserID]*event.MemberEventContent{"@bob:example.com": {Membership: event.MembershipJoin}},
-			want:    false,
+			name:        "banned",
+			members:     map[id.UserID]*event.MemberEventContent{user: {Membership: event.MembershipBan}},
+			want:        false,
+			wantLookups: 1,
+		},
+		{
+			name:        "no member event",
+			members:     map[id.UserID]*event.MemberEventContent{"@bob:example.com": {Membership: event.MembershipJoin}},
+			want:        false,
+			wantLookups: 1,
 		},
 		{
 			// Room-type repair is what resyncPortals exists for; a failed
 			// lookup must not quietly stop it.
-			name: "lookup error resyncs anyway",
-			err:  errors.New("no"),
-			want: true,
+			name:        "lookup error resyncs anyway",
+			err:         errors.New("no"),
+			want:        true,
+			wantLookups: 1,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mx := &fakeMemberLister{members: tc.members, err: tc.err}
 			log := zerolog.Nop()
-			got := shouldResyncPortal(context.Background(), mx, "!portal:example.com", user, &log)
+			portal := &bridgev2.Portal{Portal: &database.Portal{
+				PortalKey: networkid.PortalKey{ID: "15551234567"},
+				MXID:      "!portal:example.com",
+				RoomType:  tc.roomType,
+			}}
+			got := shouldResyncPortal(context.Background(), mx, portal, user, &log)
 			if got != tc.want {
 				t.Errorf("shouldResyncPortal = %v, want %v", got, tc.want)
 			}
-			if mx.calls != 1 {
-				t.Errorf("GetMembers called %d times, want 1", mx.calls)
+			if mx.calls != tc.wantLookups {
+				t.Errorf("GetMembers called %d times, want %d", mx.calls, tc.wantLookups)
 			}
 		})
+	}
+}
+
+// portalFor is a portal with nothing but its key, which is all GetChatInfo
+// reads.
+func portalFor(portalID string) *bridgev2.Portal {
+	return &bridgev2.Portal{Portal: &database.Portal{
+		PortalKey: networkid.PortalKey{ID: networkid.PortalID(portalID)},
+	}}
+}
+
+// Every portal on a line names that line's space as its parent, which is how
+// bridgev2 puts the room in it -- and creates the space if it does not exist.
+// A portal with no line has no space to go in and must stay parentless: there
+// is no default line.
+func TestChatInfoParentsAPortalOnItsLine(t *testing.T) {
+	tests := []struct {
+		portalID string
+		want     string
+	}{
+		{"home-+15551234567", "home-space"},
+		{"work-+15551234567", "work-space"},
+		{"office-main-+15551234567", "office-main-space"},
+		// A short number is still on a line.
+		{"office-1001", "office-space"},
+		// From before lines, and the key an inbound text with no line makes.
+		{"15551234567", ""},
+	}
+	var sc SIPClient
+	for _, tt := range tests {
+		t.Run(tt.portalID, func(t *testing.T) {
+			info, err := sc.GetChatInfo(context.Background(), portalFor(tt.portalID))
+			if err != nil {
+				t.Fatalf("GetChatInfo: %v", err)
+			}
+			if tt.want == "" {
+				// nil, not the empty ID: an empty one would unparent the room.
+				if info.ParentID != nil {
+					t.Errorf("ParentID = %q, want no parent at all", *info.ParentID)
+				}
+				return
+			}
+			if info.ParentID == nil || string(*info.ParentID) != tt.want {
+				t.Errorf("ParentID = %v, want %q", info.ParentID, tt.want)
+			}
+		})
+	}
+	// Two lines, two spaces.
+	home, _ := sc.GetChatInfo(context.Background(), portalFor("home-+15551234567"))
+	work, _ := sc.GetChatInfo(context.Background(), portalFor("work-+15551234567"))
+	if home.ParentID == nil || work.ParentID == nil || *home.ParentID == *work.ParentID {
+		t.Errorf("two lines share the space %v", home.ParentID)
+	}
+}
+
+// GetChatInfo is shared by every portal, so the space portal flows through
+// code written for phone numbers: it must come back as a space named after the
+// line rather than a DM with a "+<garbage>" name and a ghost in it.
+func TestChatInfoOfALineSpace(t *testing.T) {
+	var sc SIPClient
+	portal := portalFor("home-space")
+	info, err := sc.GetChatInfo(context.Background(), portal)
+	if err != nil {
+		t.Fatalf("GetChatInfo: %v", err)
+	}
+	if info.Type == nil || *info.Type != database.RoomTypeSpace {
+		t.Errorf("room type = %v, want %q", info.Type, database.RoomTypeSpace)
+	}
+	if info.Name == nil || *info.Name != "home" {
+		t.Errorf("name = %v, want the line name", info.Name)
+	}
+	// A space is not a conversation: a ghost member would be a person the
+	// line is not, and OtherUserID is what puts is_direct on the room.
+	if info.Members != nil {
+		t.Errorf("the space has a member list: %+v", info.Members)
+	}
+	if info.ParentID != nil {
+		t.Errorf("the space has a parent %q; lines do not nest", *info.ParentID)
+	}
+	// A space carries no messages, so it advertises no text length.
+	if feats := sc.GetCapabilities(context.Background(), portal); feats.MaxTextLength != 0 {
+		t.Errorf("the space advertises max_text_length %d", feats.MaxTextLength)
+	}
+}
+
+// A space has no number half, so a text in it could only be addressed to
+// "+home-space". Nothing routes that, and the refusal belongs here rather
+// than at the SIP server.
+func TestALineSpaceCannotBeTexted(t *testing.T) {
+	var sc SIPClient
+	_, err := sc.HandleMatrixMessage(context.Background(), &bridgev2.MatrixMessage{
+		MatrixEventBase: bridgev2.MatrixEventBase[*event.MessageEventContent]{
+			Portal:  portalFor("home-space"),
+			Content: &event.MessageEventContent{MsgType: event.MsgText, Body: "hi"},
+		},
+	})
+	if err == nil {
+		t.Fatal("a message in a line's space was accepted")
+	}
+}
+
+// Nothing a user can type resolves to a space: Normalize sees a number, and a
+// space ID is not one. Were it to resolve, the command would offer to start a
+// conversation with a room.
+func TestALineSpaceIsNotResolvableAsAnIdentifier(t *testing.T) {
+	var sc SIPClient
+	for _, identifier := range []string{"home-space", "home", "+home-space"} {
+		if resp, err := sc.ResolveIdentifier(context.Background(), identifier, false); err == nil {
+			t.Errorf("ResolveIdentifier(%q) resolved to %+v", identifier, resp)
+		}
 	}
 }

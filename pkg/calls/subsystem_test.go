@@ -339,21 +339,29 @@ func TestTakeNotificationsIsExhaustive(t *testing.T) {
 // subsystem did to it. Answer closes Done, as the real one effectively does:
 // the dialplan hangs the leg up the moment it is answered.
 type fakeInboundLeg struct {
-	rec       *recorder
-	mu        sync.Mutex
-	answered  int
-	rejects   []int
-	finished  bool
-	done      chan struct{}
-	closeOnce sync.Once
+	rec *recorder
+	// conference overrides the header the leg arrived with, for a test about
+	// what the bridge does with one it should refuse.
+	conference string
+	mu         sync.Mutex
+	answered   int
+	rejects    []int
+	finished   bool
+	done       chan struct{}
+	closeOnce  sync.Once
 }
 
 func newFakeInboundLeg() *fakeInboundLeg {
 	return &fakeInboundLeg{done: make(chan struct{})}
 }
 
-func (l *fakeInboundLeg) From() string          { return "sip:caller@example.com" }
-func (l *fakeInboundLeg) Conference() string    { return "sip-15551234567" }
+func (l *fakeInboundLeg) From() string { return "sip:caller@example.com" }
+func (l *fakeInboundLeg) Conference() string {
+	if l.conference != "" {
+		return l.conference
+	}
+	return "sip-15551234567"
+}
 func (l *fakeInboundLeg) Done() <-chan struct{} { return l.done }
 func (l *fakeInboundLeg) Ringing() error        { l.rec.add("180"); return nil }
 
