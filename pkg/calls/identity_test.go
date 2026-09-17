@@ -13,11 +13,10 @@ import (
 // they drift, the bridge silently joins a LiveKit room nobody else is in.
 func TestLiveKitRoomName(t *testing.T) {
 	tests := []struct {
-		name     string
-		roomID   string
-		slot     string
-		want     string
-		wantOnly string
+		name   string
+		roomID string
+		slot   string
+		want   string
 	}{
 		{
 			name:   "msc4195 test vector",

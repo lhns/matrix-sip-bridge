@@ -220,9 +220,7 @@ func (f *fakeMatrix) Members(context.Context, id.RoomID) (map[id.UserID]*event.M
 
 // fakeOutboundLeg is the control leg of a call the bridge placed.
 type fakeOutboundLeg struct {
-	mu      sync.Mutex
-	hangups int
-	done    chan struct{}
+	done chan struct{}
 }
 
 func newFakeOutboundLeg() *fakeOutboundLeg {
@@ -231,12 +229,7 @@ func newFakeOutboundLeg() *fakeOutboundLeg {
 
 func (l *fakeOutboundLeg) Done() <-chan struct{} { return l.done }
 
-func (l *fakeOutboundLeg) Hangup(context.Context) error {
-	l.mu.Lock()
-	l.hangups++
-	l.mu.Unlock()
-	return nil
-}
+func (l *fakeOutboundLeg) Hangup(context.Context) error { return nil }
 
 // testCaller is the Matrix user the harness dials as. Real, because "" is the
 // no-user case and has its own meaning on the wire.

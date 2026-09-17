@@ -38,8 +38,9 @@ type Call struct {
 	// CallID is the bridge's own identifier, not the SIP server's and not
 	// LiveKit's.
 	CallID string
-	// PortalID is the E.164 number without the leading plus, matching the
-	// bridgev2 portal and ghost IDs.
+	// PortalID is the bridgev2 portal and ghost ID, which is "<line>-<number>"
+	// or bare digits for a portal predating lines -- not a dialable number.
+	// See phonenum.NumberFromID.
 	PortalID string
 	RoomID   id.RoomID
 

@@ -480,9 +480,9 @@ func (s *Subsystem) waitForMatrix(ctx context.Context, call *database.Call, leg 
 	select {
 	case <-w.joined:
 	case <-w.ended:
-		// Teardown is not an answer. Answering here is what used to log
-		// "left the call" and "call answered" for the same call in the same
-		// breath, and rewrote the ended row back to bridged.
+		// Teardown is not an answer: answering here logs "left the call" and
+		// "call answered" for the same call in the same breath, and rewrites
+		// the ended row back to bridged.
 		log.Info().Msg("Call ended before Matrix answered")
 		return
 	case <-w.declined:

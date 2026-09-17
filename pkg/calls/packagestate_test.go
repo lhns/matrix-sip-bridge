@@ -10,11 +10,10 @@ import (
 	"testing"
 )
 
-// The subsystem's caches were package-level sync.Maps twice over: one for room
-// versions and one for room encryption. Neither was ever reaped, both were
-// shared by every subsystem in the process, and in one test binary both
-// carried answers from an earlier test into a later one. Anything a call
-// remembers belongs on the Subsystem, where its lifetime is the subsystem's.
+// Anything a call remembers belongs on the Subsystem, where its lifetime is
+// the subsystem's. A package-level cache is never reaped and is shared by
+// every subsystem in the process, so in one test binary it answers a later
+// test from an earlier one's rooms.
 //
 // Package-level values that cannot hold state are still allowed: the event
 // types, which mautrix requires as vars because event.Type is a struct, and

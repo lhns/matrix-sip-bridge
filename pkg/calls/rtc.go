@@ -51,23 +51,21 @@ func MembershipPowerLevels() map[event.Type]int {
 // Element Web have not always agreed on which they send.
 type CallMemberContent struct {
 	// Inline (current) form.
-	Application  string `json:"application,omitempty"`
-	CallID       string `json:"call_id,omitempty"`
-	DeviceID     string `json:"device_id,omitempty"`
-	CreatedTS    int64  `json:"created_ts,omitempty"`
-	ExpiresMS    int64  `json:"expires,omitempty"`
-	MembershipID string `json:"membershipID,omitempty"`
+	Application string `json:"application,omitempty"`
+	CallID      string `json:"call_id,omitempty"`
+	DeviceID    string `json:"device_id,omitempty"`
+	CreatedTS   int64  `json:"created_ts,omitempty"`
+	ExpiresMS   int64  `json:"expires,omitempty"`
 
 	// Legacy (array) form.
 	Memberships []CallMembership `json:"memberships,omitempty"`
 }
 
-// CallMembership is one entry of the legacy memberships array.
+// CallMembership is one entry of the legacy memberships array. Only its
+// expiry is read; see IsActive.
 type CallMembership struct {
-	DeviceID     string `json:"device_id,omitempty"`
-	CreatedTS    int64  `json:"created_ts,omitempty"`
-	ExpiresMS    int64  `json:"expires,omitempty"`
-	MembershipID string `json:"membershipID,omitempty"`
+	CreatedTS int64 `json:"created_ts,omitempty"`
+	ExpiresMS int64 `json:"expires,omitempty"`
 }
 
 // ParseCallMember reports whether a call.member state event describes an

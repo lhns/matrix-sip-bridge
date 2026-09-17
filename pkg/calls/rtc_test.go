@@ -2,7 +2,6 @@ package calls
 
 import (
 	"encoding/json"
-	"strconv"
 	"testing"
 	"time"
 
@@ -249,7 +248,5 @@ func TestLeaveMembershipIsEmpty(t *testing.T) {
 		t.Error("a leave must be an empty content object")
 	}
 }
-
-func itoa(v int64) string { return strconv.FormatInt(v, 10) }
 
 func idUser(s string) id.UserID { return id.UserID(s) }

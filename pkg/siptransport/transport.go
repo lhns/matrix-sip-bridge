@@ -331,7 +331,7 @@ func (t *Transport) register(ctx context.Context, expiry time.Duration) error {
 		return err
 	}
 	if isChallenge(res) {
-		res, err = t.registerWithDigest(ctx, req, res)
+		res, err = t.retryWithDigest(ctx, req, res)
 		if err != nil {
 			return err
 		}
@@ -396,14 +396,13 @@ func (t *Transport) doWithDigest(ctx context.Context, req *sip.Request) (*sip.Re
 	if !isChallenge(res) {
 		return res, nil
 	}
-	authed, err := t.authorize(req, res)
-	if err != nil {
-		return nil, err
-	}
-	return t.cli.Do(ctx, authed, sipgo.ClientRequestIncreaseCSEQ, sipgo.ClientRequestAddVia)
+	return t.retryWithDigest(ctx, req, res)
 }
 
-func (t *Transport) registerWithDigest(ctx context.Context, req *sip.Request, challenge *sip.Response) (*sip.Response, error) {
+// retryWithDigest resends a request with the challenge answered. REGISTER
+// cannot go through doWithDigest -- its first attempt needs
+// ClientRequestRegisterBuild -- so the retry itself is shared instead.
+func (t *Transport) retryWithDigest(ctx context.Context, req *sip.Request, challenge *sip.Response) (*sip.Response, error) {
 	authed, err := t.authorize(req, challenge)
 	if err != nil {
 		return nil, err
