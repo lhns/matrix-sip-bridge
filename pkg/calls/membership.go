@@ -77,8 +77,8 @@ func (s *Subsystem) publishGhostMembership(ctx context.Context, intent GhostInte
 	ident := s.identityFor(intent.GetMXID(), call.CallID)
 	s.warnIfEncrypted(ctx, intent, call.RoomID)
 	stateKey := s.stateKeyFor(ctx, intent, call.RoomID, ident.userID, ident.deviceID)
-	content := ghostMembership(ident.userID, call.RoomID, ident.deviceID, ident.membershipID,
-		s.cfg.LiveKit.JWTServiceURL, s.cfg.MembershipExpiry)
+	content := ghostMembership(time.Now(), ident.userID, call.RoomID, ident.deviceID,
+		ident.membershipID, s.cfg.LiveKit.JWTServiceURL, s.cfg.MembershipExpiry)
 	resp, err := intent.SendState(ctx, call.RoomID, CallMemberEventType, stateKey, content, time.Time{})
 	if err != nil {
 		return "", err
@@ -260,8 +260,13 @@ func supportsOwnedStateKeys(version id.RoomVersion) bool {
 // LiveKit participant identity: Element Call filters audio tracks to the
 // identities its membership list derives, and an unmatched participant is
 // inaudible as well as invisible. See ADR-0010.
-func ghostMembership(userID id.UserID, roomID id.RoomID, deviceID, membershipID, jwtServiceURL string, expiry time.Duration) *event.Content {
-	now := time.Now()
+//
+// now is a parameter because publishing this twice for one call is how the
+// outbound path tells a client to look again, and created_ts is the only field
+// that differs between the two. Synapse drops a state write whose content
+// equals the current state, so a second event built from a frozen clock would
+// never reach anyone.
+func ghostMembership(now time.Time, userID id.UserID, roomID id.RoomID, deviceID, membershipID, jwtServiceURL string, expiry time.Duration) *event.Content {
 	return &event.Content{Raw: map[string]any{
 		"member": map[string]any{
 			"user_id":     userID.String(),

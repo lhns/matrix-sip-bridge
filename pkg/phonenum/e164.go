@@ -74,9 +74,17 @@ func Normalize(input string) (string, error) {
 	return "+" + digits, nil
 }
 
-// stripURI removes a tel:/sip:/sips: scheme and any "@host" or ";param" tail,
-// so that "sip:+15551234567@pbx.example.com;user=phone" reduces to "+15551234567".
+// stripURI reduces "sip:+15551234567@pbx.example.com;user=phone" to
+// "+15551234567".
 func stripURI(s string) string {
+	user, _ := splitURI(s)
+	return user
+}
+
+// splitURI splits a tel:/sip:/sips: URI into its user part and its host,
+// dropping the scheme, the angle brackets and any ";param" tail. The host is
+// empty for a URI that has none.
+func splitURI(s string) (user, host string) {
 	s = strings.TrimPrefix(s, "<")
 	for _, scheme := range []string{"tel:", "sips:", "sip:"} {
 		if len(s) >= len(scheme) && strings.EqualFold(s[:len(scheme)], scheme) {
@@ -84,10 +92,20 @@ func stripURI(s string) string {
 			break
 		}
 	}
-	if i := strings.IndexAny(s, "@;>"); i >= 0 {
+	if i := strings.IndexAny(s, ";>"); i >= 0 {
 		s = s[:i]
 	}
-	return s
+	if i := strings.Index(s, "@"); i >= 0 {
+		host = s[i+1:]
+		// A port and a "?header" tail are not part of the host. An IPv6
+		// literal keeps its brackets and is mangled here; nothing asks this
+		// for one.
+		if j := strings.IndexAny(host, ":?"); j >= 0 {
+			host = host[:j]
+		}
+		return s[:i], host
+	}
+	return s, ""
 }
 
 // ToID strips the leading "+" to give the bare-digit form used as a portal ID,

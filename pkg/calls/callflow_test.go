@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -11,8 +12,11 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/database"
+	"github.com/lhns/matrix-sip-bridge/pkg/phonenum"
 )
 
 // Until a provisional response arrives the caller hears nothing, and building
@@ -345,5 +349,283 @@ func TestOutboundCallFromALinePortalDialsTheBareNumber(t *testing.T) {
 				t.Errorf("LiveKit participant name = %v, want %q", participant["participant_name"], wantName)
 			}
 		})
+	}
+}
+
+// A user who types !dial is not in the RTC session, so the membership alone
+// tells them nothing: they were left to find the portal room and join by hand.
+// Only the call button's caller is already in the session.
+func TestOnlyTheCallButtonSkipsTheRingNotification(t *testing.T) {
+	tests := []struct {
+		name string
+		dial func(t *testing.T, h *harness)
+		want int
+	}{
+		{"the dial command rings", func(t *testing.T, h *harness) {
+			if _, err := h.Dial(t.Context(), h.mx.portal, testCaller); err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+		}, 1},
+		{"the call button does not", func(t *testing.T, h *harness) {
+			if err := h.onMatrixJoinedCall(t.Context(), h.mx.portal, testCaller, zerolog.Nop()); err != nil {
+				t.Fatalf("onMatrixJoinedCall: %v", err)
+			}
+		}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t)
+			tt.dial(t, h)
+			if got := h.intent.count(RtcNotificationEventType); got != tt.want {
+				t.Errorf("the call sent %d ring notifications, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// The notification a commanded call sends has to be retracted like any other,
+// or the user's phone keeps showing an incoming call after the call is over.
+func TestEndingACommandedCallRetractsItsRingNotification(t *testing.T) {
+	h := newHarness(t)
+	call, err := h.Dial(t.Context(), h.mx.portal, testCaller)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	var notify id.EventID
+	for i, evt := range h.intent.events() {
+		if evt.Type == RtcNotificationEventType {
+			notify = id.EventID(fmt.Sprintf("$event%d", i+1))
+		}
+	}
+	if notify == "" {
+		t.Fatal("the commanded call sent no ring notification")
+	}
+	if err := h.endCall(t.Context(), call); err != nil {
+		t.Fatalf("endCall: %v", err)
+	}
+	if got := h.intent.redactions(); !slices.Contains(got, notify) {
+		t.Errorf("redacted %v, want the ring notification %s among them", got, notify)
+	}
+}
+
+// A number typed with a line has to key the same portal an inbound call on
+// that line keys, or the command opens a third room for the same person.
+func TestDialNumberKeysThePortalOnTheLine(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{
+		{"no line keeps the legacy key", "", "15551234567"},
+		{"a line scopes the key", "home", "home-+15551234567"},
+		{"a hyphenated line", "office-main", "office-main-+15551234567"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t)
+			if _, err := h.DialNumber(t.Context(), "+15551234567", tt.line, testCaller); err != nil {
+				t.Fatalf("DialNumber: %v", err)
+			}
+			if got := h.mx.portalsAsked(); len(got) != 1 || got[0] != tt.want {
+				t.Errorf("the portal asked for was %v, want [%q]", got, tt.want)
+			}
+		})
+	}
+}
+
+// Falling back to the line-less portal would put the call in a different room
+// from the one the user asked for, with nothing saying so.
+func TestDialNumberRefusesAnUnusableLine(t *testing.T) {
+	h := newHarness(t)
+	_, err := h.DialNumber(t.Context(), "+15551234567", "not a line", testCaller)
+	if !errors.Is(err, phonenum.ErrBadLine) {
+		t.Fatalf("DialNumber with an unusable line failed with %v, want ErrBadLine", err)
+	}
+	if got := h.mx.portalsAsked(); len(got) != 0 {
+		t.Errorf("a portal was looked up anyway: %v", got)
+	}
+	if len(h.sip.invites) != 0 {
+		t.Errorf("an INVITE went out anyway: %v", h.sip.invites)
+	}
+}
+
+// The bridge had to publish the membership before CreateSIPParticipant -- it
+// is what the Matrix side joins -- so a client that read it then resolved a
+// LiveKit identity that was not in the room yet, and nothing later told it to
+// look again. Audio went to the phone and none came back.
+func TestAnOutboundCallRepublishesTheMembershipOnceTheParticipantExists(t *testing.T) {
+	h := newHarness(t)
+	// What LiveKit had been asked for at the moment each membership went out.
+	var lkAt [][]string
+	h.intent.on = func(evt sentEvent) {
+		if evt.Type == CallMemberEventType && len(evt.Content.Raw) > 0 {
+			lkAt = append(lkAt, h.lk.calls())
+		}
+	}
+
+	if _, err := h.Dial(t.Context(), h.mx.portal, testCaller); err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+
+	memberships := activeMemberships(h.intent.events())
+	if len(memberships) != 2 {
+		t.Fatalf("the call published %d memberships, want two", len(memberships))
+	}
+	// One state key, so the second replaces the first rather than adding a
+	// participant that the retraction would then leave behind.
+	if memberships[0].StateKey != memberships[1].StateKey {
+		t.Errorf("state keys %q and %q differ; that is two memberships, not one replaced",
+			memberships[0].StateKey, memberships[1].StateKey)
+	}
+	if len(lkAt) != 2 || slices.Contains(lkAt[0], "CreateSIPParticipant") {
+		t.Errorf("the first membership went out after LiveKit saw %v, want it before the participant", lkAt)
+	}
+	if len(lkAt) != 2 || !slices.Contains(lkAt[1], "CreateSIPParticipant") {
+		t.Errorf("the second membership went out after LiveKit saw %v, want the participant already created", lkAt)
+	}
+}
+
+// Synapse drops a state write whose content equals the current state, so a
+// re-publish that differed in nothing would never reach a client and the fix
+// above would be inert. created_ts is what makes the two events differ, and it
+// has to be the only thing that does: the LiveKit identity is derived from the
+// rest, and changing any of it would point the client at a participant that
+// does not exist.
+func TestOnlyCreatedTSDiffersBetweenTwoPublishesOfOneMembership(t *testing.T) {
+	first := ghostMembership(time.UnixMilli(1_700_000_000_000), "@sip_15551234567:example.com",
+		"!portal:example.com", "SIPABCD", "m1", "https://jwt.example.com", 6*time.Hour)
+	second := ghostMembership(time.UnixMilli(1_700_000_004_000), "@sip_15551234567:example.com",
+		"!portal:example.com", "SIPABCD", "m1", "https://jwt.example.com", 6*time.Hour)
+
+	if first.Raw["created_ts"] == second.Raw["created_ts"] {
+		t.Fatal("created_ts did not move, so the second publish is deduplicated away")
+	}
+	delete(first.Raw, "created_ts")
+	delete(second.Raw, "created_ts")
+	a, _ := json.Marshal(first.Raw)
+	b, _ := json.Marshal(second.Raw)
+	if string(a) != string(b) {
+		t.Errorf("the two memberships differ in more than created_ts:\n%s\n%s", a, b)
+	}
+}
+
+// Inbound already has its participant live before any client reads the
+// membership, so it needs no second publish -- and an extra one there would be
+// a state change in a room mid-call for no reason.
+func TestAnInboundCallPublishesOneMembership(t *testing.T) {
+	h := newHarness(t)
+	leg := newFakeInboundLeg()
+	call, err := h.beginInboundCall(t.Context(), newCallID(), h.mx.portal.ID, h.conferenceFor(h.mx.portal.ID))
+	if err != nil {
+		t.Fatalf("beginInboundCall: %v", err)
+	}
+	// The waiters have to exist before the answer is signalled; signalling a
+	// call that has none is a no-op and the ring would run to its timeout.
+	waiters := h.waitersFor(call.CallID)
+	defer h.forgetWaiters(call.CallID)
+	h.signalAnswer(call.CallID)
+	h.waitForMatrix(t.Context(), call, leg, zerolog.Nop(), waiters)
+
+	if got := activeMemberships(h.intent.events()); len(got) != 1 {
+		t.Errorf("the inbound call published %d memberships, want one", len(got))
+	}
+}
+
+// Whatever a call published, ending it must leave exactly one leave event and
+// no membership standing: the production rooms are already full of stale ones.
+func TestEndingAnOutboundCallLeavesNoMembershipBehind(t *testing.T) {
+	h := newHarness(t)
+	call, err := h.Dial(t.Context(), h.mx.portal, testCaller)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	if err := h.endCall(t.Context(), call); err != nil {
+		t.Fatalf("endCall: %v", err)
+	}
+	var leaves []sentEvent
+	for _, evt := range h.intent.events() {
+		if evt.Type == CallMemberEventType && len(evt.Content.Raw) == 0 {
+			leaves = append(leaves, evt)
+		}
+	}
+	if len(leaves) != 1 {
+		t.Fatalf("ending the call sent %d leave events, want one", len(leaves))
+	}
+	if got := activeMemberships(h.intent.events()); leaves[0].StateKey != got[0].StateKey {
+		t.Errorf("the leave cleared %q, want the membership's own %q", leaves[0].StateKey, got[0].StateKey)
+	}
+}
+
+// activeMemberships returns the call.member events that are memberships rather
+// than the empty content that ends one.
+func activeMemberships(events []sentEvent) []sentEvent {
+	var out []sentEvent
+	for _, evt := range events {
+		if evt.Type == CallMemberEventType && len(evt.Content.Raw) > 0 {
+			out = append(out, evt)
+		}
+	}
+	return out
+}
+
+// !dial sends the user a ring notification for a call they placed. Its Decline
+// button reached nothing: only the inbound path has a goroutine waiting on the
+// decline channel, so the phone went on ringing.
+func TestDecliningACommandedCallEndsIt(t *testing.T) {
+	h := newHarness(t)
+	call := h.insertRingingOutbound(t)
+	h.rememberNotification("$ring", call.CallID)
+
+	h.handleRtcDecline(t.Context(), declineEvent("$ring"))
+
+	if got := h.activeCall(t); got != nil {
+		t.Fatalf("call %s is still %q after it was declined", got.CallID, got.State)
+	}
+	if got := h.intent.redactions(); !slices.Contains(got, "$ring") {
+		t.Errorf("the call redacted %v, want the ring notification it declined", got)
+	}
+}
+
+// A decline naming a notification from another bridge, or from a previous run,
+// must not tear down whatever is ringing now.
+func TestAnUnknownDeclineEndsNothing(t *testing.T) {
+	h := newHarness(t)
+	call := h.insertRingingOutbound(t)
+	h.rememberNotification("$ring", call.CallID)
+
+	h.handleRtcDecline(t.Context(), declineEvent("$someone-elses-ring"))
+
+	if got := h.activeCall(t); got == nil {
+		t.Fatal("the call was ended by a decline that named a different notification")
+	}
+}
+
+// An answered call is not declined by a late decline from a second device:
+// recording it as declined would be a lie about a call that happened.
+func TestADeclineAfterTheCallIsUpIsIgnored(t *testing.T) {
+	h := newHarness(t)
+	call, err := h.Dial(t.Context(), h.mx.portal, testCaller)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	notify := id.EventID("$ring")
+	h.rememberNotification(notify, call.CallID)
+
+	h.handleRtcDecline(t.Context(), declineEvent(notify))
+
+	if got := h.activeCall(t); got == nil {
+		t.Fatal("a decline ended a call that was already up")
+	}
+}
+
+// declineEvent is the MSC4310 event a client sends to reject the call a ring
+// notification announced.
+func declineEvent(notify id.EventID) *event.Event {
+	raw := []byte(`{"m.relates_to":{"rel_type":"m.reference","event_id":"` + notify.String() + `"}}`)
+	return &event.Event{
+		Sender:  "@alice:example.com",
+		RoomID:  "!portal:example.com",
+		Type:    RtcDeclineEventType,
+		Content: event.Content{VeryRaw: raw},
 	}
 }

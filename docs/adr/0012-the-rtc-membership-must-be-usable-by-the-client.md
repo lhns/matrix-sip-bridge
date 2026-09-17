@@ -86,3 +86,13 @@ so that the value published in the membership and the value handed to
   correctly.
 - `jwt_service_url` is required for calls to work at all, even though the
   bridge never contacts it.
+- A usable membership is also one the client reads at a moment when the
+  identity it names is in the LiveKit room. A client resolves the list when it
+  joins and when that state changes, and a participant appearing later is
+  neither. The outbound path must publish the membership before dialling —
+  it is what the Matrix side joins — so it publishes it again once
+  `CreateSIPParticipant` has returned. The two events differ only in
+  `created_ts`, which is what keeps the second from being deduplicated away,
+  and share a state key, so the retraction still clears one membership. Same
+  silence, same clean server-side health as a wrong identity, but one-way:
+  Matrix audio reaches the phone.

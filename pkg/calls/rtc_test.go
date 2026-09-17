@@ -150,7 +150,7 @@ func TestSupportsOwnedStateKeys(t *testing.T) {
 
 func TestGhostMembershipIsRoomScoped(t *testing.T) {
 	const user = "@sip_15551234567:example.com"
-	content := ghostMembership(idUser(user), "!portal:example.com", "SIPABCD", "m1",
+	content := ghostMembership(time.Now(), idUser(user), "!portal:example.com", "SIPABCD", "m1",
 		"https://matrix-rtc.example.com/livekit/jwt", time.Hour)
 	raw := content.Raw
 	if raw["application"] != "m.call" {
@@ -193,7 +193,7 @@ func TestGhostMembershipMatchesLiveKitIdentity(t *testing.T) {
 		t.Run(string(scheme), func(t *testing.T) {
 			memberID := MemberIDFor(scheme, user, "SIPABCD", "m1")
 			want := ParticipantIdentityFor(scheme, user, "SIPABCD", memberID)
-			member := ghostMembership(idUser(user), "!portal:example.com", "SIPABCD", memberID,
+			member := ghostMembership(time.Now(), idUser(user), "!portal:example.com", "SIPABCD", memberID,
 				"https://matrix-rtc.example.com/livekit/jwt", time.Hour).Raw["member"].(map[string]any)
 			got := ParticipantIdentityFor(scheme,
 				member["user_id"].(string),
@@ -214,7 +214,7 @@ func TestGhostMembershipMatchesLiveKitIdentity(t *testing.T) {
 func TestGhostMembershipCarriesACompleteFocus(t *testing.T) {
 	const roomID = "!portal:example.com"
 	const jwtURL = "https://matrix-rtc.example.com/livekit/jwt"
-	raw := ghostMembership(idUser("@sip_15551234567:example.com"), roomID, "SIPABCD", "m1",
+	raw := ghostMembership(time.Now(), idUser("@sip_15551234567:example.com"), roomID, "SIPABCD", "m1",
 		jwtURL, time.Hour).Raw
 
 	active, ok := raw["focus_active"].(map[string]any)

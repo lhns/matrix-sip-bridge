@@ -929,13 +929,44 @@ func (s *Subsystem) handleRtcDecline(ctx context.Context, evt *event.Event) {
 		return
 	}
 	callID, signalled := s.signalDecline(notify)
-	if !signalled {
+	if callID == "" {
 		return
 	}
 	s.log.Info().
 		Str("call_id", callID).
 		Stringer("sender", evt.Sender).
 		Msg("Matrix declined the call")
+	if signalled {
+		return
+	}
+	// Nobody was waiting on the decline channel, so there is no inbound leg
+	// being held open: this is a call the Matrix side placed with !dial, and
+	// the notification it is rejecting is its own. Without this the button
+	// does nothing and the phone rings on.
+	s.declineOwnCall(ctx, callID)
+}
+
+// declineOwnCall ends an outbound call the user rejected from the ring
+// notification that !dial sent them.
+//
+// Only while it is still ringing, which is the same window the inbound path
+// acts in: once the call is up, a decline is a stale one from a second device,
+// and recording an answered call as declined would be a lie about what
+// happened.
+func (s *Subsystem) declineOwnCall(ctx context.Context, callID string) {
+	call, err := s.db.Call.GetByCallID(ctx, callID)
+	if err != nil {
+		s.log.Warn().Err(err).Str("call_id", callID).Msg("Could not look up the declined call")
+		return
+	}
+	if call == nil || call.State != database.StateRinging {
+		return
+	}
+	// endCallAs is a compare-and-swap, so a decline racing the callee picking
+	// up loses rather than tearing down a live call.
+	if err := s.declineCall(ctx, call); err != nil {
+		s.log.Warn().Err(err).Str("call_id", callID).Msg("Failed to end the declined call")
+	}
 }
 
 // onMatrixJoinedCall answers a ringing inbound call, or places an outbound one.
@@ -953,7 +984,7 @@ func (s *Subsystem) onMatrixJoinedCall(ctx context.Context, portal Portal, joine
 		log.Info().Msg("RTC membership in a portal with no call, dialling out")
 		// dial, not Dial: the lookup Dial would repeat is the one just made.
 		// The joiner is the caller: nothing else in the room asked for this.
-		_, err = s.dial(ctx, portal, joiner)
+		_, err = s.dial(ctx, portal, joiner, originRTCJoin)
 		return err
 	}
 	if call.State != database.StateRinging {
@@ -1037,8 +1068,25 @@ func (s *Subsystem) bridgeMedia(ctx context.Context, call *database.Call) error 
 	return s.db.Call.Update(ctx, call)
 }
 
+// dialOrigin says how an outbound call was started, which is what decides
+// whether Matrix is rung for it. Direction cannot decide it: both origins
+// place outbound calls and only one of them has the caller in the session
+// already.
+type dialOrigin int
+
+const (
+	// originRTCJoin is Element's call button: the user published their RTC
+	// membership, so they are in the session and a ring would ring their own
+	// phone.
+	originRTCJoin dialOrigin = iota
+	// originCommand is !dial. Nobody is in the session yet, and without the
+	// notification the user has to find the portal room and join by hand.
+	originCommand
+)
+
 // Dial places an outbound call to the number a portal represents, unless one
-// is already in progress there. caller is the Matrix user who asked for it.
+// is already in progress there. caller is the Matrix user who asked for it,
+// from outside the call: this is the command path, and it rings Matrix.
 func (s *Subsystem) Dial(ctx context.Context, portal Portal, caller id.UserID) (*database.Call, error) {
 	if !s.cfg.Enabled {
 		return nil, fmt.Errorf("call bridging is disabled")
@@ -1048,13 +1096,13 @@ func (s *Subsystem) Dial(ctx context.Context, portal Portal, caller id.UserID) (
 	} else if existing != nil {
 		return existing, nil
 	}
-	return s.dial(ctx, portal, caller)
+	return s.dial(ctx, portal, caller, originCommand)
 }
 
 // dial places the call. The caller owns the check that the portal has no call
 // in progress; repeating it here cost a second identical query on the path the
 // Matrix call button takes.
-func (s *Subsystem) dial(ctx context.Context, portal Portal, caller id.UserID) (*database.Call, error) {
+func (s *Subsystem) dial(ctx context.Context, portal Portal, caller id.UserID, origin dialOrigin) (*database.Call, error) {
 	if !s.cfg.Enabled {
 		return nil, fmt.Errorf("call bridging is disabled")
 	}
@@ -1092,12 +1140,22 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal, caller id.UserID) (
 	// without it: it is what the Matrix side joins, so a callee answered into
 	// a conference that has no Matrix participant stays there until they hang
 	// up themselves.
-	//
-	// No ring notification, though. The Matrix side started this call and is
-	// already in the session; notifying it would ring the caller's own phone.
-	if _, err := s.publishGhostMembership(ctx, intent, call); err != nil {
+	membership, err := s.publishGhostMembership(ctx, intent, call)
+	if err != nil {
 		_ = s.failCall(ctx, call, "could not connect")
 		return nil, fmt.Errorf("publish ghost RTC membership: %w", err)
+	}
+	// Before the INVITE, which blocks until the callee answers: after it the
+	// user would be told to join a call that is already up. Remembering it is
+	// what lets a decline find the call and what redacts it when the call
+	// ends.
+	if origin == originCommand {
+		if notify, err := s.publishRingNotification(ctx, intent, call, membership); err != nil {
+			s.log.Warn().Err(err).Str("call_id", call.CallID).
+				Msg("Failed to send the ring notification; the user who dialled has to find the room themselves")
+		} else {
+			s.rememberNotification(notify, call.CallID)
+		}
 	}
 
 	uri := strings.ReplaceAll(s.cfg.OutboundURI, "{number}", phonenum.NumberFromID(portalID))
@@ -1141,6 +1199,18 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal, caller id.UserID) (
 		_ = s.failCall(ctx, call, mediaFailureReason(err))
 		return nil, err
 	}
+	// Again, now that the participant it names is in the LiveKit room.
+	//
+	// A client resolves which identities to subscribe to when it joins and
+	// when the membership state changes; a participant turning up later is
+	// neither. Outbound has to publish before dialling -- it is what the
+	// Matrix side joins -- so without this second event the call carries
+	// Matrix audio to the phone and none back. Same state key, so the
+	// retraction still clears exactly one. Not fatal: one-way beats dropped.
+	if _, err := s.publishGhostMembership(ctx, intent, call); err != nil {
+		s.log.Warn().Err(err).Str("call_id", call.CallID).
+			Msg("Could not re-publish the RTC membership; the Matrix side may hear nothing")
+	}
 	s.log.Info().
 		Str("call_id", call.CallID).
 		Str("portal_id", portalID).
@@ -1150,8 +1220,15 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal, caller id.UserID) (
 
 // DialNumber resolves a number to its portal and calls it, on behalf of the
 // Matrix user who asked.
-func (s *Subsystem) DialNumber(ctx context.Context, number string, caller id.UserID) (*database.Call, error) {
-	portalID, err := phonenum.NormalizeToID(number)
+//
+// line names which line presents the call and may be empty for none. It is
+// passed through, never checked against a list and never defaulted: the bridge
+// does not know which lines exist (ADR-0014), so a line it cannot spell into a
+// portal ID is an error here and an unroutable one is the SIP server's to
+// refuse. Silently dropping it would put the call in a different portal from
+// the one that line's inbound calls land in.
+func (s *Subsystem) DialNumber(ctx context.Context, number, line string, caller id.UserID) (*database.Call, error) {
+	portalID, err := phonenum.IDFor(line, number)
 	if err != nil {
 		return nil, err
 	}

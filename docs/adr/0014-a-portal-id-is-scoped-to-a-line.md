@@ -65,16 +65,24 @@ be trusted to remember.
   second, line-scoped one. The old rooms keep working — they are legacy IDs and
   still resolve to the same E.164 number — but they are not where that line's
   new calls land.
-- `ResolveIdentifier` and `!dial` still build a line-less portal key from a
-  typed number, because a number alone does not say which line to use. Such a
-  portal dials out correctly and is reachable by text, but an inbound call
-  arrives on a line and therefore lands in that line's portal instead. Giving
-  the bridge a default line would be exactly the routing knowledge this ADR
-  keeps out of it; resolving it belongs with whatever teaches Matrix users to
-  pick a line.
-- An inbound SIP MESSAGE still keys its portal on the sender's number alone
-  (ADR-0003's form). Text has no line in the protocol the way a call has a
-  conference header.
+- `ResolveIdentifier` builds a line-less portal key from a typed number,
+  because a number alone does not say which line to use. Such a portal dials
+  out correctly and is reachable by text, but an inbound call arrives on a line
+  and therefore lands in that line's portal instead. Giving the bridge a
+  default line would be exactly the routing knowledge this ADR keeps out of it,
+  so the line is asked for instead: `!dial <number> <line>` spells the
+  composite key and is the only way a typed number reaches the portal that
+  line's inbound calls land in. The name is checked for being readable back out
+  of the ID and for nothing else; an unroutable one is the SIP server's to
+  refuse, and is never dropped in favour of the line-less portal.
+- An inbound SIP MESSAGE carries its line in the host of the `From` URI, where
+  the SIP server writes it in place of the carrier's own host, so a text and a
+  call from the same person on the same line share one portal and one ghost.
+  When no line resolves, that host is the trunk's hostname instead, and the two
+  are indistinguishable on the wire: a line name may therefore not contain a
+  dot, and a host that looks like a hostname keys the line-less portal rather
+  than minting one named after a trunk. SMS cannot say which DID it reached, so
+  every text on a trunk lands on that trunk's default line.
 - The bridge names the Matrix user who placed an outbound call, in the header
   `sip.caller_header` (empty by default, which sends nothing). That is identity,
   not routing: the bridge still does not know what a line is, which trunk it

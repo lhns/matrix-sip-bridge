@@ -16,3 +16,4 @@
 | [0012](0012-the-rtc-membership-must-be-usable-by-the-client.md) | The RTC membership must be usable by the client that reads it | Accepted |
 | [0013](0013-a-portal-is-a-direct-chat.md) | A portal is a direct chat | Accepted |
 | [0014](0014-a-portal-id-is-scoped-to-a-line.md) | A portal ID is scoped to a line and spells its own number | Accepted |
+| [0015](0015-audio-is-verified-from-livekit-sip-call-statistics.md) | Audio is verified from livekit-sip's call statistics, not from the bridge | Accepted |

@@ -148,6 +148,12 @@ type fakeMatrix struct {
 	portal    Portal
 	portalErr error
 	members   map[id.UserID]*event.MemberEventContent
+
+	// asked records the portal IDs PortalRoom was called with. It is the only
+	// place a dial entry point's ID arithmetic is visible, the portal itself
+	// being fixed.
+	mu    sync.Mutex
+	asked []string
 }
 
 func newFakeMatrix(rec *recorder) *fakeMatrix {
@@ -165,12 +171,22 @@ func (f *fakeMatrix) GhostIntent(context.Context, string) (GhostIntent, error) {
 	return f.intent, nil
 }
 
-func (f *fakeMatrix) PortalRoom(context.Context, string) (Portal, error) {
+func (f *fakeMatrix) PortalRoom(_ context.Context, portalID string) (Portal, error) {
 	f.rec.add("portal")
+	f.mu.Lock()
+	f.asked = append(f.asked, portalID)
+	f.mu.Unlock()
 	if f.portalErr != nil {
 		return Portal{}, f.portalErr
 	}
 	return f.portal, nil
+}
+
+// portalsAsked returns the portal IDs PortalRoom was called with.
+func (f *fakeMatrix) portalsAsked() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.asked...)
 }
 
 func (f *fakeMatrix) PortalByMXID(_ context.Context, roomID id.RoomID) (Portal, bool) {
@@ -349,6 +365,19 @@ func (h *harness) insertRinging(t *testing.T) *database.Call {
 	}
 	if err := h.db.Call.Insert(context.Background(), call); err != nil {
 		t.Fatalf("insert call: %v", err)
+	}
+	return call
+}
+
+// insertRingingOutbound writes the row a call the Matrix side placed has while
+// the phone rings, which is the only window a decline acts in.
+func (h *harness) insertRingingOutbound(t *testing.T) *database.Call {
+	t.Helper()
+	call := h.insertRinging(t)
+	call.Direction = database.DirectionOutbound
+	if _, err := h.db.Exec(context.Background(),
+		"UPDATE sip_call SET direction = 'outbound' WHERE call_id = $1", call.CallID); err != nil {
+		t.Fatalf("mark the call outbound: %v", err)
 	}
 	return call
 }

@@ -121,6 +121,9 @@ const (
 		FROM sip_call WHERE conference = $1 AND state <> 'ended'
 		ORDER BY created_at DESC LIMIT 1
 	`
+	getCallByIDQuery = `
+		SELECT ` + callColumns + ` FROM sip_call WHERE call_id = $1
+	`
 	getAllActiveCallsQuery = `
 		SELECT ` + callColumns + ` FROM sip_call WHERE state <> 'ended'
 	`
@@ -207,6 +210,12 @@ func (cq *CallQuery) GetActiveByPortal(ctx context.Context, portalID string) (*C
 // GetActiveByConference resolves a conference name back to a call, or nil.
 func (cq *CallQuery) GetActiveByConference(ctx context.Context, conference string) (*Call, error) {
 	return cq.QueryOne(ctx, getActiveCallByConferenceQuery, conference)
+}
+
+// GetByCallID returns one call whatever its state, or nil. The state is the
+// caller's to check: an event naming a call that has already ended is normal.
+func (cq *CallQuery) GetByCallID(ctx context.Context, callID string) (*Call, error) {
+	return cq.QueryOne(ctx, getCallByIDQuery, callID)
 }
 
 // GetAllActive returns every call not yet ended.

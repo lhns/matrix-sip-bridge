@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"errors"
 	"strings"
 
 	"maunium.net/go/mautrix/bridgev2/commands"
@@ -23,27 +24,55 @@ func (sc *SIPConnector) dialCommand() *commands.FullHandler {
 		Help: commands.HelpMeta{
 			Section:     helpSectionCalls,
 			Description: "Call a phone number, creating its portal room if needed",
-			Args:        "<_phone number_>",
+			Args:        "<_phone number_> [_line_]",
 		},
 		RequiresLogin: true,
 		Func: func(ce *commands.Event) {
-			number := strings.TrimSpace(ce.RawArgs)
-			if number == "" {
-				ce.Reply("Usage: `$cmdprefix dial <phone number>`, in international format, e.g. `+15551234567`")
+			if strings.TrimSpace(ce.RawArgs) == "" {
+				ce.Reply("Usage: `$cmdprefix dial <phone number> [line]`, the number in international " +
+					"format, e.g. `+15551234567 home`. Without a line the call gets the number's " +
+					"line-less room, not the one that line's inbound calls land in.")
 				return
 			}
-			if _, err := phonenum.Normalize(number); err != nil {
-				ce.Reply("That is not a usable number: %v", err)
-				return
-			}
-			call, err := sc.calls.DialNumber(ce.Ctx, number, ce.User.MXID)
-			if err != nil {
+			number, line := splitDialArgs(ce.RawArgs)
+			call, err := sc.calls.DialNumber(ce.Ctx, number, line, ce.User.MXID)
+			switch {
+			case errors.Is(err, phonenum.ErrBadLine):
+				// Never fall back to a line-less call: that is a different
+				// portal room, and the user asked for this line.
+				ce.Reply("`%s` is not a usable line name. Letters, digits, dashes and "+
+					"underscores only, starting with a letter or digit — no dots, which is "+
+					"what tells a line from a trunk hostname.", line)
+			case errors.Is(err, phonenum.ErrNotE164), errors.Is(err, phonenum.ErrEmpty):
+				ce.Reply("`%s` is not a usable number: %v", number, err)
+			case err != nil && line == "":
 				ce.Reply("Failed to place the call: %v", err)
-				return
+			case err != nil:
+				ce.Reply("Failed to place the call on line `%s`: %v", line, err)
+			default:
+				where := phonenum.NumberFromID(call.PortalID)
+				if got := phonenum.LineFromID(call.PortalID); got != "" {
+					where += " on line " + got
+				}
+				ce.Reply("Calling %s. Join the call in [the portal room](%s).",
+					where, call.RoomID.URI().MatrixToURL())
 			}
-			ce.Reply("Calling %s. Join the call in [the portal room](%s).",
-				phonenum.NumberFromID(call.PortalID),
-				call.RoomID.URI().MatrixToURL())
 		},
 	}
+}
+
+// splitDialArgs reads "<number> [line]" off the raw argument string.
+//
+// The line is the last word, and only when what is left is still a number:
+// Normalize tolerates a number written with spaces, so "+1 555 123 4567" must
+// not read its last group as a line name. The one ambiguity that leaves is an
+// all-digit line name, which is swallowed into the number instead -- give a
+// line a name with a letter in it.
+func splitDialArgs(raw string) (number, line string) {
+	fields := strings.Fields(raw)
+	joined := strings.Join(fields, "")
+	if _, err := phonenum.Normalize(joined); err == nil || len(fields) < 2 {
+		return joined, ""
+	}
+	return strings.Join(fields[:len(fields)-1], ""), fields[len(fields)-1]
 }

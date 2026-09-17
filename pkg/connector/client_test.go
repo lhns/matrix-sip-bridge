@@ -14,6 +14,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
+	"github.com/lhns/matrix-sip-bridge/pkg/phonenum"
 	"github.com/lhns/matrix-sip-bridge/pkg/siptransport"
 )
 
@@ -295,6 +296,48 @@ func TestPortalNameCarriesTheLineButTheGhostDoesNot(t *testing.T) {
 			}
 			if !slices.Equal(user.Identifiers, tt.identifier) {
 				t.Errorf("ghost identifiers = %v, want %v", user.Identifiers, tt.identifier)
+			}
+		})
+	}
+}
+
+// One person, one conversation. The key a call uses is its conference header
+// with calls.conference_prefix removed -- "sip-home-+15551234567" gives
+// "home-+15551234567" -- so an inbound text on that line has to produce the
+// same string, or the same human gets two rooms and two ghosts.
+func TestInboundMessageKeysThePortalOnTheLine(t *testing.T) {
+	tests := []struct {
+		name string
+		from string
+		want string
+	}{
+		{"line in the host", "sip:+15551234567@home", "home-+15551234567"},
+		{"hyphenated line", "sip:+15551234567@office-main", "office-main-+15551234567"},
+		{"line with a port", "sip:+15551234567@home:5060", "home-+15551234567"},
+		// The SIP server falls back to the trunk's own hostname when it cannot
+		// resolve a line. A portal keyed on a trunk name is a room no call
+		// would ever land in, so this keeps the line-less key instead.
+		{"trunk hostname is not a line", "sip:+15551234567@sip.example.com", "15551234567"},
+		{"sbc address is not a line", "sip:+15551234567@198.51.100.7", "15551234567"},
+		{"no host at all", "+15551234567", "15551234567"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg, err := parseInboundMessage(inboundMessage{From: tt.from, To: "+15559876543", Body: "hi"})
+			if err != nil {
+				t.Fatalf("parseInboundMessage: %v", err)
+			}
+			// From stays a number whatever the host said; the line rides
+			// beside it.
+			if msg.From != "+15551234567" {
+				t.Errorf("From = %q, want the E.164 number", msg.From)
+			}
+			got, err := phonenum.IDFor(msg.Line, msg.From)
+			if err != nil {
+				t.Fatalf("IDFor(%q, %q): %v", msg.Line, msg.From, err)
+			}
+			if got != tt.want {
+				t.Errorf("portal key = %q, want %q", got, tt.want)
 			}
 		})
 	}

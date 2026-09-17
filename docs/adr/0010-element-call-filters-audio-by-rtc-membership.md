@@ -71,6 +71,8 @@ nobody to talk to.
   side. This is the most dangerous setting near this bridge. The mode-selection
   code was read; the full SFrame path was not traced, so treat it as
   high-confidence rather than proven and check it against a live client.
+  ADR-0015 is how such a call is told apart from a working one after the fact:
+  `room.track_subscribes` is 0 while the SIP side's packet count is not.
 - The state key format is branched on the room version. An unreadable version
   falls back to the underscore-prefixed form, which every room version accepts.
 - Between a crash mid-call and the restart, a phantom participant sits in the

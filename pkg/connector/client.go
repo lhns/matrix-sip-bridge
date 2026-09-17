@@ -218,6 +218,10 @@ type inboundMessage struct {
 	From string
 	To   string
 	Body string
+	// Line is the line the SIP server resolved the message to, empty for
+	// none. From stays E.164 either way; everything downstream of it expects a
+	// number, not a URI.
+	Line string
 }
 
 // parseInboundMessage normalises the addresses of an inbound message.
@@ -230,7 +234,11 @@ func parseInboundMessage(raw inboundMessage) (*inboundMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sender %q: %w", raw.From, err)
 	}
-	msg := &inboundMessage{From: from, Body: raw.Body}
+	// The sender's host is the LINE, not the carrier's host: the SIP server
+	// rewrites it on the call path and the message path alike, so this is what
+	// puts a call and a text from the same person in one portal. Read before
+	// Normalize, which keeps only the digits.
+	msg := &inboundMessage{From: from, Body: raw.Body, Line: phonenum.LineFromURI(raw.From)}
 	// The recipient is informational; a trunk that presents it oddly must not
 	// stop the message being bridged.
 	if to, err := phonenum.Normalize(raw.To); err == nil {
@@ -248,7 +256,7 @@ func parseInboundMessage(raw inboundMessage) (*inboundMessage, error) {
 // status, so the far end knows the text did not land.
 func (sc *SIPConnector) handleInboundMessage(_ context.Context, in siptransport.InboundMessage) error {
 	log := sc.br.Log.With().Str("component", "inbound sms").Logger()
-	msg, err := parseInboundMessage(inboundMessage(in))
+	msg, err := parseInboundMessage(inboundMessage{From: in.From, To: in.To, Body: in.Body})
 	if err != nil {
 		log.Warn().Err(err).Msg("Ignoring unusable inbound message")
 		// The message is unusable, not undelivered; answering with a failure
@@ -263,7 +271,15 @@ func (sc *SIPConnector) handleInboundMessage(_ context.Context, in siptransport.
 		sc.metrics.Message(metrics.DirectionInbound, metrics.MessageDroppedNoLogin)
 		return fmt.Errorf("no login yet")
 	}
-	portalID := phonenum.ToID(msg.From)
+	// The same key the conference header gives a call from this person on this
+	// line, so both land in one portal with one ghost. Without a line it is
+	// ADR-0003's line-less key, as before.
+	portalID, err := phonenum.IDFor(msg.Line, msg.From)
+	if err != nil {
+		log.Warn().Err(err).Str("line", msg.Line).Msg("Ignoring unusable inbound message")
+		sc.metrics.Message(metrics.DirectionInbound, metrics.MessageDroppedBadSender)
+		return nil
+	}
 	sc.br.QueueRemoteEvent(login, &simplevent.Message[*inboundMessage]{
 		EventMeta: simplevent.EventMeta{
 			Type: bridgev2.RemoteEventMessage,

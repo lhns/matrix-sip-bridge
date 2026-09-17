@@ -173,6 +173,12 @@ send one that would not.
   E.164; a `From` it cannot read as a number is logged and dropped, because a
   portal keyed on a malformed identifier could never be replied to. The body is
   the message text, raw — not base64, and not carried in a custom header.
+- The `From` **host** is the line, put there in place of the carrier's own
+  host — `sip:+15551234567@home`. It is what keeps a text and a call from the
+  same person in one portal, since a MESSAGE has no conference header. A host
+  that is not a line name (anything with a dot in it, so any trunk hostname or
+  address) is ignored and the message keys the line-less portal, as it did
+  before lines. A line name therefore must not contain a dot.
 - **From the bridge**: to `messages.outbound_to` with `{number}` replaced by the
   destination as the portal ID spells it, from `messages.outbound_from`.
 - chan_sip needs `accept_outofcall_message=yes` and an
@@ -399,6 +405,102 @@ vnet acceptable; see the comment at the top of
 Like readiness, the endpoint does not exist under websocket transport or
 `no_server`.
 
+### Verifying a call actually carried audio
+
+"A call happened" and "audio flowed both ways" are different assertions, and
+only the second matters to the people on the call. The silent failure is
+invisible everywhere else: signalling succeeds, the dialog is established,
+`sip_bridge_calls_total` counts an `answered` call, every pod is `1/1 Running`,
+and neither end hears anything. The bridge cannot see it — it is not in the
+media path, see
+[ADR-0005](docs/adr/0005-calls-bridged-as-media-via-livekit-sip.md) — so the
+check reads livekit-sip, which is.
+
+livekit-sip logs one `call statistics` line per finished call. Three of its
+fields decide the verdict:
+
+| field | what it counts | in a silent call |
+| --- | --- | --- |
+| `stats.port.audio_packets` | RTP the SIP leg received | **non-zero** — the far end always sends |
+| `stats.room.input_packets` | audio the LiveKit room delivered to the SIP leg | 0 |
+| `stats.room.track_subscribes` | LiveKit tracks the SIP leg subscribed to | 0 |
+
+The first field is why a silent call reads as healthy: it is large in the broken
+case as well as the working one, so any check built on "did media move" rather
+than "did media move *in both directions*" passes.
+
+[`cmd/callaudit`](cmd/callaudit) parses that line. One mode for a probe, one for
+a scrape, over the same verdict:
+
+```sh
+# place a test call, then assert it carried audio. The exit status is the assertion.
+kubectl -n matrix logs deploy/livekit-sip --since=10m | callaudit
+
+# or follow the log and export the verdicts
+kubectl -n matrix logs -f deploy/livekit-sip | callaudit -listen :9102
+```
+
+Both forms read the log through the API server, and that is not incidental: a
+container cannot read another container's stdout, so this cannot be a sidecar in
+the livekit-sip pod. It runs from a laptop after a test call, or as a CronJob or
+small Deployment with a ServiceAccount allowed `get` on `pods/log`.
+
+| exit | meaning |
+| --- | --- |
+| 0 | every judged call carried audio both ways |
+| 1 | at least one did not |
+| 2 | the run proved nothing: no `call statistics` line in the input, or one that could not be read |
+
+2 is deliberately not folded into 0. A probe that placed no call, or that
+scraped the wrong window, otherwise reports green — and so would a livekit-sip
+release that renames a `stats` field, which is why an unreadable line fails the
+run instead of being skipped.
+
+Verdicts are `both`, `sip_only` (the silent call), `matrix_only`, `none`, and
+`too_short` for a call whose *total* activity is below `-min-packets`: a hangup
+during ring is not a media failure, and a probe that never connected is not a
+pass. Above that floor each direction is judged on zero versus non-zero, not on
+the floor again — the two counters are not on the same scale (the observed
+working call carried 956 SIP packets against 51 room ones), so a per-direction
+floor would report a short working call as the fault.
+
+`-listen` exports five families, all present at zero from startup. It reads to
+EOF and then exits, so it dies with the log stream rather than serving stale
+counters.
+
+| metric | type | labels |
+| --- | --- | --- |
+| `livekit_sip_audit_calls_total` | counter | `direction`, `audio` |
+| `livekit_sip_audit_packets_total` | counter | `direction`, `stream` |
+| `livekit_sip_audit_room_subscribes_total` | counter | `direction` |
+| `livekit_sip_audit_lines_total` | counter | `result` |
+| `livekit_sip_audit_last_call_timestamp_seconds` | gauge | — |
+
+The cardinality rule above applies unchanged and is tighter here than it looks:
+the source line carries the caller's number in four fields and the Matrix room
+in a fifth, and none of them are parsed at all. `direction` is livekit-sip's,
+which is the **inverse** of the bridge's — livekit-sip only ever originates, so
+a call arriving from the PSTN is `outbound` to it. Do not join the two.
+
+**What this does not prove.** The two directions it judges are livekit-sip's
+own: what its SIP leg received, and what the room delivered to it. **A call
+where the client never subscribes to the SIP participant's track reads as
+`both`** — livekit-sip publishes regardless of who is listening, and nothing in
+this line counts its subscribers, so a one-way call in that direction is
+invisible here. `ListParticipants` on the LiveKit server API can see it, live,
+and is not read by this tool.
+
+It is also a packet count, not an ear: a call carrying
+well-formed audio of the wrong thing, at the wrong level, or with unusable
+jitter still reads as `both`. It cannot say *why* a call was silent —
+`track_subscribes: 0` narrows it to the SIP leg subscribing to nothing in the
+LiveKit room, and no further — a client filtering audio by RTC membership
+([ADR-0010](docs/adr/0010-element-call-filters-audio-by-rtc-membership.md)) and
+a client that never reached the SFU at all because its UDP range is not
+forwarded produce the identical line. And it only sees calls that have
+**ended**, because livekit-sip emits the line at teardown, so there is no signal
+at all while a call is in progress and this can never be a probe.
+
 ### Image tags
 
 CI publishes to `ghcr.io/lhns/matrix-sip-bridge`. Every push to `main` produces
@@ -410,6 +512,7 @@ image.
 
 ```
 main.go                    mxmain.BridgeMain: flags, config, -g registration
+cmd/callaudit/             the end-to-end audio check: a livekit-sip log in, a verdict out
 pkg/connector/             bridgev2 NetworkConnector and NetworkAPI (messaging)
   connector.go               lifecycle, static login, event-processor wiring
   client.go                  inbound and outbound SIP MESSAGE
@@ -437,6 +540,7 @@ pkg/calls/                 the call subsystem, independent of bridgev2 plumbing
   identity.go                LiveKit room-name and participant-identity derivation
   livekit.go                 twirp JSON client for the LiveKit SIP and room APIs
   trunk.go                   outbound-trunk reconciliation (Redis loses it)
+pkg/callaudit/             livekit-sip `call statistics` -> did audio move both ways
 pkg/metrics/               the Prometheus collectors and the cardinality rule
 pkg/phonenum/              E.164 normalisation and portal-ID round trips
 pkg/database/              db.Child() tables for call state, separate from bridgev2
