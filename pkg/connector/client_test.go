@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/configupgrade"
 	"gopkg.in/yaml.v3"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
@@ -128,6 +131,12 @@ func TestExampleConfigMatchesTheStruct(t *testing.T) {
 	if c.SIP.Transport != "tcp" {
 		t.Errorf("sip.transport = %q, want tcp", c.SIP.Transport)
 	}
+	// The example config is also the base an upgrade fills a missing key
+	// from, so this true is what keeps spaces on for a deployment that
+	// predates the key.
+	if !c.LineSpaces {
+		t.Error("line_spaces = false in the example config, so an upgrade turns spaces off")
+	}
 	if c.SIP.ConferenceHeader != "X-Conference" {
 		t.Errorf("sip.conference_header = %q", c.SIP.ConferenceHeader)
 	}
@@ -156,7 +165,7 @@ func TestExampleConfigMatchesTheStruct(t *testing.T) {
 // on the Matrix side, so claiming the list is complete kicks the owning user
 // out of their own room on every call.
 func TestChatInfoDoesNotClaimAFullMemberList(t *testing.T) {
-	sc := &SIPClient{}
+	sc := testClient(true)
 	info, err := sc.GetChatInfo(context.Background(), &bridgev2.Portal{
 		Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: "15551234567"}},
 	})
@@ -172,7 +181,7 @@ func TestChatInfoDoesNotClaimAFullMemberList(t *testing.T) {
 // bridgev2 creates the room with is_direct unset and never puts it in the
 // user's m.direct, and the call presents as a group call.
 func TestChatInfoIsADirectChat(t *testing.T) {
-	sc := &SIPClient{}
+	sc := testClient(true)
 	info, err := sc.GetChatInfo(context.Background(), &bridgev2.Portal{
 		Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: "15551234567"}},
 	})
@@ -278,7 +287,7 @@ func TestPortalNameCarriesTheLineButTheGhostDoesNot(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.portalID, func(t *testing.T) {
-			var sc SIPClient
+			sc := testClient(true)
 			portal := &bridgev2.Portal{Portal: &database.Portal{
 				PortalKey: networkid.PortalKey{ID: networkid.PortalID(tt.portalID)},
 			}}
@@ -441,6 +450,12 @@ func TestShouldResyncPortal(t *testing.T) {
 	}
 }
 
+// testClient is a client whose config carries nothing but the line_spaces
+// switch, which is all GetChatInfo reads of it. true is the shipped default.
+func testClient(lineSpaces bool) *SIPClient {
+	return &SIPClient{conn: &SIPConnector{Config: Config{LineSpaces: lineSpaces}}}
+}
+
 // portalFor is a portal with nothing but its key, which is all GetChatInfo
 // reads.
 func portalFor(portalID string) *bridgev2.Portal {
@@ -466,7 +481,7 @@ func TestChatInfoParentsAPortalOnItsLine(t *testing.T) {
 		// From before lines, and the key an inbound text with no line makes.
 		{"15551234567", ""},
 	}
-	var sc SIPClient
+	sc := testClient(true)
 	for _, tt := range tests {
 		t.Run(tt.portalID, func(t *testing.T) {
 			info, err := sc.GetChatInfo(context.Background(), portalFor(tt.portalID))
@@ -497,7 +512,7 @@ func TestChatInfoParentsAPortalOnItsLine(t *testing.T) {
 // code written for phone numbers: it must come back as a space named after the
 // line rather than a DM with a "+<garbage>" name and a ghost in it.
 func TestChatInfoOfALineSpace(t *testing.T) {
-	var sc SIPClient
+	sc := testClient(true)
 	portal := portalFor("home-space")
 	info, err := sc.GetChatInfo(context.Background(), portal)
 	if err != nil {
@@ -527,7 +542,7 @@ func TestChatInfoOfALineSpace(t *testing.T) {
 // "+home-space". Nothing routes that, and the refusal belongs here rather
 // than at the SIP server.
 func TestALineSpaceCannotBeTexted(t *testing.T) {
-	var sc SIPClient
+	sc := testClient(true)
 	_, err := sc.HandleMatrixMessage(context.Background(), &bridgev2.MatrixMessage{
 		MatrixEventBase: bridgev2.MatrixEventBase[*event.MessageEventContent]{
 			Portal:  portalFor("home-space"),
@@ -543,7 +558,7 @@ func TestALineSpaceCannotBeTexted(t *testing.T) {
 // space ID is not one. Were it to resolve, the command would offer to start a
 // conversation with a room.
 func TestALineSpaceIsNotResolvableAsAnIdentifier(t *testing.T) {
-	var sc SIPClient
+	sc := testClient(true)
 	for _, identifier := range []string{"home-space", "home", "+home-space"} {
 		if resp, err := sc.ResolveIdentifier(context.Background(), identifier, false); err == nil {
 			t.Errorf("ResolveIdentifier(%q) resolved to %+v", identifier, resp)
@@ -573,7 +588,7 @@ func TestChatInfoLeavesAUserRenamedRoomAlone(t *testing.T) {
 		{portalID: "home-space", wantName: "home", wantSpace: true},
 	} {
 		t.Run(tc.portalID, func(t *testing.T) {
-			var sc SIPClient
+			sc := testClient(true)
 			info, err := sc.GetChatInfo(context.Background(), portalFor(tc.portalID))
 			if err != nil {
 				t.Fatalf("GetChatInfo: %v", err)
@@ -620,7 +635,7 @@ func TestChatInfoLeavesAUserRenamedRoomAlone(t *testing.T) {
 // A rename by anyone but the bridge itself has to be remembered, or the next
 // thing that reasserts the portal's description takes it away again.
 func TestHandleMatrixRoomNameRecordsTheUsersName(t *testing.T) {
-	var sc SIPClient
+	sc := testClient(true)
 	portal := portalFor("home-+15551234567")
 	changed, err := sc.HandleMatrixRoomName(context.Background(), &bridgev2.MatrixRoomName{
 		MatrixEventBase: bridgev2.MatrixEventBase[*event.RoomNameEventContent]{
@@ -654,7 +669,7 @@ func TestEmptyRoomNameResetsToTheBridgeName(t *testing.T) {
 		{"home-space", "home"},
 	} {
 		t.Run(tc.portalID, func(t *testing.T) {
-			var sc SIPClient
+			sc := testClient(true)
 			portal := renamedPortal(tc.portalID)
 			portal.Name = "Plumber"
 			portal.NameSet = true
@@ -702,7 +717,7 @@ func TestPortalPowerLevelsAllowBothCallsAndRenaming(t *testing.T) {
 			t.Errorf("%s = %v (present: %v), want 0", evtType.Type, level, ok)
 		}
 	}
-	var sc SIPClient
+	sc := testClient(true)
 	info, err := sc.GetChatInfo(context.Background(), portalFor("home-+15551234567"))
 	if err != nil {
 		t.Fatalf("GetChatInfo: %v", err)
@@ -737,5 +752,149 @@ func TestPortalMetadataRoundTripsThroughJSON(t *testing.T) {
 	}
 	if old.NameSetByUser {
 		t.Error("an empty metadata object read as a user rename")
+	}
+}
+
+// line_spaces off means only that a new room is not put in a space. Nothing
+// else about a space changes, because the spaces and their m.space.child
+// entries stay in place.
+func TestLineSpacesOffNamesNoParent(t *testing.T) {
+	sc := testClient(false)
+	for _, portalID := range []string{"home-+15551234567", "office-1001", "15551234567"} {
+		info, err := sc.GetChatInfo(context.Background(), portalFor(portalID))
+		if err != nil {
+			t.Fatalf("GetChatInfo(%q): %v", portalID, err)
+		}
+		// nil, not the empty ID: an empty one would pull the room out of the
+		// space it is already in.
+		if info.ParentID != nil {
+			t.Errorf("%s named the parent %q with line_spaces off", portalID, *info.ParentID)
+		}
+		if info.Type == nil || *info.Type != database.RoomTypeDM {
+			t.Errorf("%s room type = %v, want %q", portalID, info.Type, database.RoomTypeDM)
+		}
+	}
+}
+
+// The space portals created while line_spaces was on are still in the
+// database with room_type space. Described as a DM, bridgev2 refuses the
+// change ("Tried to change existing room type from/to space") and the room
+// stays a space that the bridge now names after a number and fills with a
+// ghost.
+func TestALineSpaceIsStillASpaceWithLineSpacesOff(t *testing.T) {
+	sc := testClient(false)
+	portal := portalFor("home-space")
+	info, err := sc.GetChatInfo(context.Background(), portal)
+	if err != nil {
+		t.Fatalf("GetChatInfo: %v", err)
+	}
+	if info.Type == nil || *info.Type != database.RoomTypeSpace {
+		t.Errorf("room type = %v, want %q", info.Type, database.RoomTypeSpace)
+	}
+	if info.Name == nil || *info.Name != "home" {
+		t.Errorf("name = %v, want the line name", info.Name)
+	}
+	if info.Members != nil {
+		t.Errorf("the space grew a member list: %+v", info.Members)
+	}
+	if info.ParentID != nil {
+		t.Errorf("the space grew the parent %q", *info.ParentID)
+	}
+}
+
+// A space is a room, not a number, whatever the switch says: turning
+// line_spaces off must not make an existing one look dialable or textable.
+// The dialling half is refused in pkg/calls, which never sees this config.
+func TestALineSpaceStaysUnusableWithLineSpacesOff(t *testing.T) {
+	sc := testClient(false)
+	portal := portalFor("home-space")
+	if _, err := sc.HandleMatrixMessage(context.Background(), &bridgev2.MatrixMessage{
+		MatrixEventBase: bridgev2.MatrixEventBase[*event.MessageEventContent]{
+			Portal:  portal,
+			Content: &event.MessageEventContent{MsgType: event.MsgText, Body: "hi"},
+		},
+	}); err == nil {
+		t.Error("a message in a line's space was accepted")
+	}
+	if feats := sc.GetCapabilities(context.Background(), portal); feats.MaxTextLength != 0 {
+		t.Errorf("the space advertises max_text_length %d", feats.MaxTextLength)
+	}
+	// The resync skip reads the stored room type, so it holds for a space
+	// created before the switch was turned off.
+	mx := &fakeMemberLister{members: map[id.UserID]*event.MemberEventContent{
+		"@alice:example.com": {Membership: event.MembershipJoin},
+	}}
+	log := zerolog.Nop()
+	space := &bridgev2.Portal{Portal: &database.Portal{
+		PortalKey: networkid.PortalKey{ID: "home-space"},
+		MXID:      "!space:example.com",
+		RoomType:  database.RoomTypeSpace,
+	}}
+	if shouldResyncPortal(context.Background(), mx, space, "@alice:example.com", &log) {
+		t.Error("a line's space was resynced")
+	}
+}
+
+// The trap this switch is one wrong line away from: a new key absent from an
+// existing config loads as false, which would silently unparent every room on
+// the next restart of a deployment that has spaces. The upgrader has to carry
+// the example config's true over instead.
+func TestLineSpacesStaysOnWhenUpgradingAnOldConfig(t *testing.T) {
+	// The network section as v0.1.0 wrote it: no line_spaces key at all.
+	const old = `
+sip:
+    listen: 0.0.0.0:5060
+messages:
+    enabled: true
+calls:
+    enabled: true
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatalf("writing the old config: %v", err)
+	}
+	_, target, upgrader := (&SIPConnector{}).GetConfig()
+	base, ok := upgrader.(configupgrade.BaseUpgrader)
+	if !ok {
+		t.Fatalf("the upgrader %T has no base config, so nothing fills a missing key in", upgrader)
+	}
+	upgraded, _, err := configupgrade.Do(path, false, base)
+	if err != nil {
+		t.Fatalf("configupgrade.Do: %v", err)
+	}
+	cfg, ok := target.(*Config)
+	if !ok {
+		t.Fatalf("GetConfig unmarshals into %T", target)
+	}
+	if err := yaml.Unmarshal(upgraded, cfg); err != nil {
+		t.Fatalf("the upgraded config does not parse: %v\n%s", err, upgraded)
+	}
+	if !cfg.LineSpaces {
+		t.Errorf("line_spaces = false after upgrading a config without the key:\n%s", upgraded)
+	}
+	// The operator's own values must still win over the base.
+	if cfg.SIP.Listen != "0.0.0.0:5060" {
+		t.Errorf("sip.listen = %q, want the old config's value", cfg.SIP.Listen)
+	}
+}
+
+// An operator who turned it off keeps it off: the upgrade copies the value,
+// it does not reassert the default.
+func TestLineSpacesOffSurvivesAnUpgrade(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("line_spaces: false\n"), 0o600); err != nil {
+		t.Fatalf("writing the config: %v", err)
+	}
+	_, target, upgrader := (&SIPConnector{}).GetConfig()
+	upgraded, _, err := configupgrade.Do(path, false, upgrader.(configupgrade.BaseUpgrader))
+	if err != nil {
+		t.Fatalf("configupgrade.Do: %v", err)
+	}
+	cfg := target.(*Config)
+	if err := yaml.Unmarshal(upgraded, cfg); err != nil {
+		t.Fatalf("the upgraded config does not parse: %v", err)
+	}
+	if cfg.LineSpaces {
+		t.Errorf("line_spaces came back as true:\n%s", upgraded)
 	}
 }

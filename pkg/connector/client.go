@@ -136,6 +136,9 @@ func (sc *SIPClient) GetCapabilities(_ context.Context, portal *bridgev2.Portal)
 // GetChatInfo describes a portal: the Matrix user and the one phone number,
 // or -- for the one portal per line that is a space -- the line itself.
 func (sc *SIPClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
+	// Not behind line_spaces: a portal that is already a space stays one, and
+	// describing it as a DM only earns bridgev2's "Tried to change existing
+	// room type" and a DM room left acting as a parent.
 	if line := phonenum.LineFromSpaceID(string(portal.ID)); line != "" {
 		return keepUserName(portal, spaceChatInfo(line)), nil
 	}
@@ -172,9 +175,12 @@ func (sc *SIPClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (*b
 	// The line's space, which bridgev2 creates as a parent portal if it does
 	// not exist yet. A portal with no line stays parentless: there is no
 	// default line, and a nil ParentID leaves the parent alone where an empty
-	// one would unparent the room.
-	if space, err := phonenum.SpaceIDFor(phonenum.LineFromID(string(portal.ID))); err == nil {
-		info.ParentID = ptr.Ptr(networkid.PortalID(space))
+	// one would unparent the room -- which is also how line_spaces off leaves
+	// a room already in a space where it is.
+	if sc.conn.Config.LineSpaces {
+		if space, err := phonenum.SpaceIDFor(phonenum.LineFromID(string(portal.ID))); err == nil {
+			info.ParentID = ptr.Ptr(networkid.PortalID(space))
+		}
 	}
 	return keepUserName(portal, info), nil
 }
