@@ -30,7 +30,7 @@ func TestApplyDefaults(t *testing.T) {
 
 func TestApplyDefaultsKeepsConfiguredValues(t *testing.T) {
 	c := Config{
-		Listen:           "10.0.0.1:5062",
+		Listen:           "192.0.2.1:5062",
 		Transport:        "udp",
 		PublicAddress:    "sip.example.com:5062",
 		ConferenceHeader: "X-Room",
