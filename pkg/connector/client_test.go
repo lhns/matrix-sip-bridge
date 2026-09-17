@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
 	"github.com/lhns/matrix-sip-bridge/pkg/phonenum"
@@ -338,6 +341,75 @@ func TestInboundMessageKeysThePortalOnTheLine(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("portal key = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// fakeMemberLister is the GetMembers half of the Matrix connector.
+type fakeMemberLister struct {
+	members map[id.UserID]*event.MemberEventContent
+	err     error
+	calls   int
+}
+
+func (f *fakeMemberLister) GetMembers(context.Context, id.RoomID) (map[id.UserID]*event.MemberEventContent, error) {
+	f.calls++
+	return f.members, f.err
+}
+
+// A resync re-invites the user to every portal it touches, so a room the user
+// has left must not be resynced at startup.
+func TestShouldResyncPortal(t *testing.T) {
+	const user = id.UserID("@alice:example.com")
+	for _, tc := range []struct {
+		name    string
+		members map[id.UserID]*event.MemberEventContent
+		err     error
+		want    bool
+	}{
+		{
+			name:    "joined",
+			members: map[id.UserID]*event.MemberEventContent{user: {Membership: event.MembershipJoin}},
+			want:    true,
+		},
+		{
+			name:    "invited",
+			members: map[id.UserID]*event.MemberEventContent{user: {Membership: event.MembershipInvite}},
+			want:    true,
+		},
+		{
+			name:    "left",
+			members: map[id.UserID]*event.MemberEventContent{user: {Membership: event.MembershipLeave}},
+			want:    false,
+		},
+		{
+			name:    "banned",
+			members: map[id.UserID]*event.MemberEventContent{user: {Membership: event.MembershipBan}},
+			want:    false,
+		},
+		{
+			name:    "no member event",
+			members: map[id.UserID]*event.MemberEventContent{"@bob:example.com": {Membership: event.MembershipJoin}},
+			want:    false,
+		},
+		{
+			// Room-type repair is what resyncPortals exists for; a failed
+			// lookup must not quietly stop it.
+			name: "lookup error resyncs anyway",
+			err:  errors.New("no"),
+			want: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mx := &fakeMemberLister{members: tc.members, err: tc.err}
+			log := zerolog.Nop()
+			got := shouldResyncPortal(context.Background(), mx, "!portal:example.com", user, &log)
+			if got != tc.want {
+				t.Errorf("shouldResyncPortal = %v, want %v", got, tc.want)
+			}
+			if mx.calls != 1 {
+				t.Errorf("GetMembers called %d times, want 1", mx.calls)
 			}
 		})
 	}

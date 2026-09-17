@@ -14,6 +14,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/calls"
 	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
@@ -58,7 +59,16 @@ func (sc *SIPClient) resyncPortals(ctx context.Context) {
 		br.Log.Warn().Err(err).Msg("Could not list portals to resync; existing rooms keep their old room type")
 		return
 	}
+	log := br.Log.With().Str("action", "resync portals").Logger()
 	for _, portal := range portals {
+		// A resync is a remote event, and bridgev2 re-invites the login to
+		// every portal a remote event touches (MarkInPortal); its "already in
+		// there" cache is in memory, so every restart re-invites the user to
+		// every room they have left. A room they are not in needs no room-type
+		// repair anyway.
+		if !shouldResyncPortal(ctx, br.Matrix, portal.MXID, sc.UserLogin.UserMXID, &log) {
+			continue
+		}
 		br.QueueRemoteEvent(sc.UserLogin, &simplevent.ChatResync{
 			EventMeta: simplevent.EventMeta{
 				Type:      bridgev2.RemoteEventChatResync,
@@ -67,6 +77,31 @@ func (sc *SIPClient) resyncPortals(ctx context.Context) {
 			GetChatInfoFunc: sc.GetChatInfo,
 		})
 	}
+}
+
+// memberLister is the one call shouldResyncPortal needs of the Matrix
+// connector.
+type memberLister interface {
+	GetMembers(ctx context.Context, roomID id.RoomID) (map[id.UserID]*event.MemberEventContent, error)
+}
+
+// shouldResyncPortal reports whether a portal room may be resynced at startup,
+// which is true unless the user has demonstrably left it.
+//
+// This covers the restart path only. A real inbound call or text still
+// re-invites the user to a room they left, which is wanted: otherwise they
+// would silently miss it.
+func shouldResyncPortal(ctx context.Context, mx memberLister, roomID id.RoomID, userID id.UserID, log *zerolog.Logger) bool {
+	members, err := mx.GetMembers(ctx, roomID)
+	if err != nil {
+		// Resync anyway. Skipping on a failed lookup would quietly stop the
+		// room-type repair this function exists to do.
+		log.Warn().Err(err).Stringer("room_id", roomID).
+			Msg("Could not read portal membership; resyncing it regardless")
+		return true
+	}
+	member, ok := members[userID]
+	return ok && member.Membership.IsInviteOrJoin()
 }
 
 func (sc *SIPClient) Disconnect() {}
