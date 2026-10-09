@@ -43,6 +43,13 @@ type Call struct {
 	// See phonenum.NumberFromID.
 	PortalID string
 	RoomID   id.RoomID
+	// Receiver is the Matrix user whose portal room the call is in: each user
+	// has a room of their own per number, so one phone call can ring several
+	// rooms at once. Empty for a row from before per-user portals.
+	Receiver id.UserID
+	// MatrixUser is the Matrix user on the call: inbound, whoever answered, so
+	// empty until then; outbound, whoever dialled.
+	MatrixUser id.UserID
 
 	Direction CallDirection
 	// Conference is the name of the conference holding the call. It is what
@@ -82,12 +89,12 @@ func newCall(*dbutil.QueryHelper[*Call]) *Call {
 }
 
 const (
-	callColumns = `call_id, portal_id, room_id, direction, conference,
+	callColumns = `call_id, portal_id, room_id, receiver, matrix_user, direction, conference,
 	               lk_room, lk_identity, lk_participant, state, created_at, updated_at`
 
 	insertCallQuery = `
 		INSERT INTO sip_call (` + callColumns + `)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 	`
 	// The state guard is what stops a late writer from resurrecting a call
 	// that has already been torn down. Every terminal path goes through
@@ -110,16 +117,31 @@ const (
 		UPDATE sip_call SET state = 'ended', updated_at = $2
 		WHERE call_id = $1 AND state <> 'ended'
 	`
+	// answerCallQuery is the claim on a conference: the first leg to win it is
+	// the one that gets answered. Several legs share a conference, so the
+	// guard looks at the conference, not at this row.
+	answerCallQuery = `
+		UPDATE sip_call SET state = 'bridged', matrix_user = $3, updated_at = $4
+		WHERE call_id = $1 AND state = 'ringing'
+		  AND NOT EXISTS (SELECT 1 FROM sip_call o WHERE o.conference = $2 AND o.state = 'bridged')
+	`
 	// An "active" call is anything not yet ended. There is at most one per
-	// number, so ordering by created_at only matters if state got out of sync.
-	getActiveCallByPortalQuery = `
+	// room, so ordering by created_at only matters if state got out of sync.
+	getActiveCallByRoomQuery = `
 		SELECT ` + callColumns + `
-		FROM sip_call WHERE portal_id = $1 AND state <> 'ended'
+		FROM sip_call WHERE room_id = $1 AND state <> 'ended'
 		ORDER BY created_at DESC LIMIT 1
 	`
 	getActiveCallByConferenceQuery = `
 		SELECT ` + callColumns + `
-		FROM sip_call WHERE conference = $1 AND state <> 'ended'
+		FROM sip_call WHERE conference = $1 AND receiver = $2 AND state <> 'ended'
+		ORDER BY created_at DESC LIMIT 1
+	`
+	answeredElsewhereQuery = `
+		SELECT ` + callColumns + `
+		FROM sip_call
+		WHERE conference = $1 AND call_id <> $2 AND direction = 'inbound'
+		  AND matrix_user <> '' AND state IN ('bridged', 'ended') AND created_at >= $3
 		ORDER BY created_at DESC LIMIT 1
 	`
 	getCallByIDQuery = `
@@ -135,7 +157,7 @@ const (
 func (c *Call) Scan(row dbutil.Scannable) (*Call, error) {
 	var createdAt, updatedAt int64
 	err := row.Scan(
-		&c.CallID, &c.PortalID, &c.RoomID, &c.Direction, &c.Conference,
+		&c.CallID, &c.PortalID, &c.RoomID, &c.Receiver, &c.MatrixUser, &c.Direction, &c.Conference,
 		&c.LKRoom, &c.LKIdentity, &c.LKParticipant, &c.State, &createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -148,7 +170,7 @@ func (c *Call) Scan(row dbutil.Scannable) (*Call, error) {
 
 func (c *Call) insertValues() []any {
 	return []any{
-		c.CallID, c.PortalID, c.RoomID, c.Direction, c.Conference,
+		c.CallID, c.PortalID, c.RoomID, c.Receiver, c.MatrixUser, c.Direction, c.Conference,
 		c.LKRoom, c.LKIdentity, c.LKParticipant, c.State,
 		c.CreatedAt.UnixMilli(), c.UpdatedAt.UnixMilli(),
 	}
@@ -203,14 +225,36 @@ func (cq *CallQuery) swap(ctx context.Context, c *Call, to CallState, query stri
 	return true, nil
 }
 
-// GetActiveByPortal returns the call in progress for a number, or nil.
-func (cq *CallQuery) GetActiveByPortal(ctx context.Context, portalID string) (*Call, error) {
-	return cq.QueryOne(ctx, getActiveCallByPortalQuery, portalID)
+// Answer moves a ringing call to bridged for matrixUser, unless another leg of
+// the same conference is already bridged, and reports whether this caller
+// won. Like Transition, false is not an error. The claim and the transition
+// are one statement so two legs cannot both win.
+func (cq *CallQuery) Answer(ctx context.Context, c *Call, matrixUser id.UserID) (bool, error) {
+	won, err := cq.swap(ctx, c, StateBridged, answerCallQuery, c.CallID, c.Conference, matrixUser)
+	if won {
+		c.MatrixUser = matrixUser
+	}
+	return won, err
 }
 
-// GetActiveByConference resolves a conference name back to a call, or nil.
-func (cq *CallQuery) GetActiveByConference(ctx context.Context, conference string) (*Call, error) {
-	return cq.QueryOne(ctx, getActiveCallByConferenceQuery, conference)
+// GetActiveByRoom returns the call in progress in a portal room, or nil.
+func (cq *CallQuery) GetActiveByRoom(ctx context.Context, roomID id.RoomID) (*Call, error) {
+	return cq.QueryOne(ctx, getActiveCallByRoomQuery, roomID)
+}
+
+// GetActiveByConference returns the call in progress in a conference for one
+// receiver's room, or nil. Legs of one phone call share the conference and
+// differ in the receiver.
+func (cq *CallQuery) GetActiveByConference(ctx context.Context, conference string, receiver id.UserID) (*Call, error) {
+	return cq.QueryOne(ctx, getActiveCallByConferenceQuery, conference, receiver)
+}
+
+// AnsweredElsewhere returns the other inbound leg of c's conference that a
+// Matrix user answered, or nil. The row may be bridged or already ended.
+// within bounds how far before c an answered leg may have been created, so a
+// previous call to the same number is not mistaken for this one's winner.
+func (cq *CallQuery) AnsweredElsewhere(ctx context.Context, c *Call, within time.Duration) (*Call, error) {
+	return cq.QueryOne(ctx, answeredElsewhereQuery, c.Conference, c.CallID, c.CreatedAt.Add(-within).UnixMilli())
 }
 
 // GetByCallID returns one call whatever its state, or nil. The state is the
