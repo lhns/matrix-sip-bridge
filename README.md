@@ -643,7 +643,8 @@ pkg/connector/             bridgev2 NetworkConnector and NetworkAPI (messaging)
   logins.go                  recipient -> the user's own login, created on first mention
   migrate.go                 startup move of the old shared login's rooms to its owner
   spaces.go                  a portal's line space under its own receiver, and its repair
-  dialroom.go                line members, and the dial room that opens a number's room
+  dialroom.go                the dial room that opens a number's room
+  linemembers.go             line_members: the logins, and the space and dial room each gets
   client.go                  inbound and outbound SIP MESSAGE
   commands.go                !dial, resolving a number to the portal it has
   config.go                  network config struct and upgrader
