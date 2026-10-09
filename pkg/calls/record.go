@@ -23,6 +23,10 @@ type callEnd struct {
 	// Failure is the short reason the bridge could not carry the call, e.g.
 	// "no route". Empty means the call did not fail.
 	Failure string
+	// AnsweredBy is the display name of whoever answered the phone call in
+	// another recipient's room. Set when an unanswered leg ends, never by the
+	// path that ends it.
+	AnsweredBy string
 	// Quiet suppresses the record entirely. It is for the bookkeeping paths
 	// that end a row whose call is long over -- a stale row discarded hours
 	// later must not announce itself as a missed call.
@@ -59,6 +63,8 @@ func callOutcome(call *database.Call, end callEnd) string {
 		return metrics.OutcomeStale
 	case end.Failure != "":
 		return metrics.OutcomeFailed
+	case end.AnsweredBy != "":
+		return metrics.OutcomeAnsweredElsewhere
 	// UpdatedAt is the ringing -> bridged transition for an answered call,
 	// which is the nearest thing the row has to an answer time; see
 	// database.Call.UpdatedAt.
@@ -98,6 +104,8 @@ func callRecordBody(call *database.Call, end callEnd, now time.Time) string {
 		return "Incoming call — " + formatCallDuration(now.Sub(call.UpdatedAt))
 	case metrics.OutcomeDeclined:
 		return "Call declined"
+	case metrics.OutcomeAnsweredElsewhere:
+		return "Answered by " + end.AnsweredBy
 	default:
 		// Missed, and stale -- which postCallRecord never renders.
 		if outbound {

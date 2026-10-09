@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/emiago/sipgo/sip"
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/ptr"
 	"maunium.net/go/mautrix/bridgev2"
@@ -22,7 +23,7 @@ import (
 	"github.com/lhns/matrix-sip-bridge/pkg/siptransport"
 )
 
-// SIPClient is the NetworkAPI for the one shared SIP login.
+// SIPClient is the NetworkAPI of one Matrix user's SIP login.
 type SIPClient struct {
 	UserLogin *bridgev2.UserLogin
 	conn      *SIPConnector
@@ -35,7 +36,7 @@ var (
 )
 
 // Connect reports the SIP endpoint's state to Matrix. The endpoint itself is
-// owned by the connector, not by the login, because it is shared.
+// owned by the connector, not by the login: every login shares it.
 func (sc *SIPClient) Connect(ctx context.Context) {
 	// The startup context is cancelled once Connect returns, and the resync
 	// outlives it.
@@ -47,7 +48,8 @@ func (sc *SIPClient) Connect(ctx context.Context) {
 	sc.UserLogin.BridgeState.Send(state)
 }
 
-// resyncPortals re-reads the chat info of every portal that already has a room.
+// resyncPortals re-reads the chat info of every portal of this login that
+// already has a room.
 //
 // A portal's room type is only ever set from GetChatInfo, and nothing else in
 // this bridge asks for it again after the room exists. Without this, a portal
@@ -62,6 +64,11 @@ func (sc *SIPClient) resyncPortals(ctx context.Context) {
 	}
 	log := br.Log.With().Str("action", "resync portals").Logger()
 	for _, portal := range portals {
+		// Only this login's own: a resync invites the login's user to the
+		// room, and every login runs this.
+		if portal.Receiver != sc.UserLogin.ID {
+			continue
+		}
 		// A resync is a remote event, and bridgev2 re-invites the login to
 		// every portal a remote event touches (MarkInPortal); its "already in
 		// there" cache is in memory, so every restart re-invites the user to
@@ -70,7 +77,7 @@ func (sc *SIPClient) resyncPortals(ctx context.Context) {
 		if !shouldResyncPortal(ctx, br.Matrix, portal, sc.UserLogin.UserMXID, &log) {
 			continue
 		}
-		br.QueueRemoteEvent(sc.UserLogin, &simplevent.ChatResync{
+		sc.conn.enqueue(sc.UserLogin, &simplevent.ChatResync{
 			EventMeta: simplevent.EventMeta{
 				Type:      bridgev2.RemoteEventChatResync,
 				PortalKey: portal.PortalKey,
@@ -318,9 +325,8 @@ func (sc *SIPClient) ResolveIdentifier(ctx context.Context, identifier string, _
 		return nil, err
 	}
 	userID := networkid.UserID(portalID)
-	// Receiver is left empty: portals are shared between all Matrix users,
-	// because there is only one trunk and one conversation per number.
-	portalKey := networkid.PortalKey{ID: networkid.PortalID(portalID)}
+	// Every user has their own room for a number: the receiver is their login.
+	portalKey := networkid.PortalKey{ID: networkid.PortalID(portalID), Receiver: sc.UserLogin.ID}
 
 	ghost, err := sc.UserLogin.Bridge.GetGhostByID(ctx, userID)
 	if err != nil {
@@ -368,9 +374,11 @@ func (sc *SIPClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	if sc.conn.sip == nil {
 		return nil, fmt.Errorf("the SIP endpoint is not running")
 	}
-	// msg.Event.Sender, not the login: relay swaps the UserLogin a message is sent
-	// through and leaves the event alone, so this is the real person in both modes.
-	if err := sc.conn.sip.SendMessage(ctx, to, cfg.OutboundFrom, body, msg.Event.Sender); err != nil {
+	from, err := outboundFrom(cfg.OutboundFrom, phonenum.LineFromID(string(msg.Portal.ID)))
+	if err != nil {
+		return nil, err
+	}
+	if err := sc.conn.sip.SendMessage(ctx, to, from, body, msg.Event.Sender); err != nil {
 		return nil, err
 	}
 	// A 200 to a SIP MESSAGE carries no message identifier, so the bridge
@@ -379,9 +387,31 @@ func (sc *SIPClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	return &bridgev2.MatrixMessageResponse{
 		DB: &database.Message{
 			ID:       networkid.MessageID("out-" + strconv.FormatInt(time.Now().UnixNano(), 36)),
-			SenderID: networkid.UserID(LoginID),
+			SenderID: outboundSenderID,
 		},
 	}, nil
+}
+
+// outboundSenderID is the sender recorded on a message sent to SIP. It is the
+// ghost the shared login used to stand for; its row exists, and
+// message.sender_id has a foreign key to ghost.
+const outboundSenderID = networkid.UserID("sip")
+
+// outboundFrom is the From URI of a text sent on a portal's line: the
+// configured one with its host replaced by the line, which is what an inbound
+// text carries (a host without a dot is a line, with one a hostname). A portal
+// without a line sends the configured URI unchanged.
+func outboundFrom(configured, line string) (string, error) {
+	if line == "" || configured == "" {
+		return configured, nil
+	}
+	var uri sip.Uri
+	if err := sip.ParseUri(configured, &uri); err != nil {
+		return "", fmt.Errorf("messages.outbound_from %q: %w", configured, err)
+	}
+	uri.Host = line
+	uri.Port = 0
+	return uri.String(), nil
 }
 
 // inboundMessage carries the parsed fields of an inbound SIP MESSAGE.
@@ -425,7 +455,7 @@ func parseInboundMessage(raw inboundMessage) (*inboundMessage, error) {
 //
 // Returning an error makes the transport answer the MESSAGE with a failure
 // status, so the far end knows the text did not land.
-func (sc *SIPConnector) handleInboundMessage(_ context.Context, in siptransport.InboundMessage) error {
+func (sc *SIPConnector) handleInboundMessage(ctx context.Context, in siptransport.InboundMessage) error {
 	log := sc.br.Log.With().Str("component", "inbound sms").Logger()
 	msg, err := parseInboundMessage(inboundMessage{From: in.From, To: in.To, Body: in.Body})
 	if err != nil {
@@ -436,11 +466,12 @@ func (sc *SIPConnector) handleInboundMessage(_ context.Context, in siptransport.
 		sc.metrics.Message(metrics.DirectionInbound, metrics.MessageDroppedBadSender)
 		return nil
 	}
-	login := sc.br.GetCachedUserLoginByID(networkid.UserLoginID(LoginID))
-	if login == nil {
-		log.Warn().Msg("Dropping inbound message: nobody has logged in yet")
-		sc.metrics.Message(metrics.DirectionInbound, metrics.MessageDroppedNoLogin)
-		return fmt.Errorf("no login yet")
+	login, err := sc.logins.Login(ctx, in.Recipient)
+	if err != nil {
+		log.Warn().Err(err).Str("recipient", in.Recipient).Msg("Refusing an inbound message")
+		sc.metrics.Message(metrics.DirectionInbound, metrics.MessageRefusedRecipient)
+		code, reason := calls.RecipientStatus(err)
+		return &siptransport.RejectError{Code: code, Reason: reason, Err: err}
 	}
 	// The same key the conference header gives a call from this person on this
 	// line, so both land in one portal with one ghost. Without a line it is
@@ -451,13 +482,13 @@ func (sc *SIPConnector) handleInboundMessage(_ context.Context, in siptransport.
 		sc.metrics.Message(metrics.DirectionInbound, metrics.MessageDroppedBadSender)
 		return nil
 	}
-	sc.br.QueueRemoteEvent(login, &simplevent.Message[*inboundMessage]{
+	sc.enqueue(login, &simplevent.Message[*inboundMessage]{
 		EventMeta: simplevent.EventMeta{
 			Type: bridgev2.RemoteEventMessage,
 			LogContext: func(c zerolog.Context) zerolog.Context {
 				return c.Str("from", msg.From)
 			},
-			PortalKey:    networkid.PortalKey{ID: networkid.PortalID(portalID)},
+			PortalKey:    networkid.PortalKey{ID: networkid.PortalID(portalID), Receiver: login.ID},
 			CreatePortal: true,
 			Sender:       bridgev2.EventSender{Sender: networkid.UserID(portalID)},
 			Timestamp:    time.Now(),
@@ -470,6 +501,14 @@ func (sc *SIPConnector) handleInboundMessage(_ context.Context, in siptransport.
 	})
 	sc.metrics.Message(metrics.DirectionInbound, metrics.MessageBridged)
 	return nil
+}
+
+func (sc *SIPConnector) enqueue(login *bridgev2.UserLogin, evt bridgev2.RemoteEvent) {
+	if sc.queueEvent != nil {
+		sc.queueEvent(login, evt)
+		return
+	}
+	sc.br.QueueRemoteEvent(login, evt)
 }
 
 func convertInboundMessage(_ context.Context, _ *bridgev2.Portal, _ bridgev2.MatrixAPI, data *inboundMessage) (*bridgev2.ConvertedMessage, error) {

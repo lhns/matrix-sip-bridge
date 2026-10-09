@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR-0016](0016-per-user-logins-and-portals.md)
 
 ## Context
 

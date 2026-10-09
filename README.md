@@ -3,7 +3,8 @@
 [![CI](https://github.com/lhns/matrix-sip-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/lhns/matrix-sip-bridge/actions/workflows/ci.yml)
 
 A Matrix bridge that is a SIP endpoint. Text messages and phone calls both land
-in a portal room per phone number: an inbound SIP MESSAGE appears as an
+in a portal room per phone number, one set of rooms per Matrix user: an inbound
+SIP MESSAGE appears as an
 `m.room.message` from a per-number ghost, and a Matrix message in that room goes
 back out as a SIP MESSAGE. A call is bridged as real media, not as a
 notification — the SIP server parks the far end in a conference and
@@ -94,11 +95,16 @@ handles, so an Asterisk `qualify` works against it.
 The SIP server dials the bridge as one branch of a parallel `Dial()`, with the
 conference name in a custom header.
 
+The server sends **one INVITE leg per recipient**, each carrying the recipient
+header and all with the same `X-Conference`. Every recipient is rung in their own
+room.
+
 What the bridge reads from the INVITE:
 
 | Header | Use |
 | --- | --- |
 | `X-Conference` (name configurable as `sip.conference_header`) | **Required.** The conference the caller will land in. It must be `calls.conference_prefix` (default `sip-`) followed by the portal ID, e.g. `sip-home-+15551234567`. The part after the prefix becomes the portal ID, so the portal room and the ghost are named from this header and from nothing else. See [ADR-0014](docs/adr/0014-a-portal-id-is-scoped-to-a-line.md) for the ID's two halves |
+| `X-Matrix-Recipient` (name configurable as `sip.recipient_header`) | The Matrix user this leg is for, e.g. `@alice:example.com`. Absent means the default recipient (see [Upgrading from a shared login](#upgrading-from-a-shared-login)). A user `bridge.permissions` gives no `login` is refused with 403; a value that is not an MXID, or no header and no default, with 404 |
 | `From` | Logging only. Its user part is not used to route |
 | Request-URI / `To` | Not used. Put anything routable there |
 | Body | Must be an SDP offer containing PCMU (0) or PCMA (8) |
@@ -109,10 +115,11 @@ What the bridge sends back, in order:
 | --- | --- |
 | `100 Trying` | immediately, from the transaction layer |
 | `180 Ringing` | as soon as the conference header has been accepted, before the portal is looked up or created |
-| `200 OK` with SDP | **only** once a Matrix user has actually joined the RTC session |
-| `404 Not Found` | the conference header is missing, or does not carry the configured prefix |
+| `200 OK` with SDP | **only** once the Matrix user has joined the RTC session **and** livekit-sip has joined the conference |
+| `403 Forbidden` | the recipient is not permitted to use the bridge |
+| `404 Not Found` | the conference header is missing, or does not carry the configured prefix; or the recipient is unusable |
 | `480 Temporarily Unavailable` | nobody joined within `calls.ring_timeout` (45s by default) |
-| `486 Busy Here` | a Matrix client declined the call |
+| `486 Busy Here` | the recipient's Matrix client declined the call. Only that leg: the others keep ringing |
 | `488 Not Acceptable Here` | the INVITE carried no SDP, or offered neither PCMU nor PCMA |
 | `500` / `503` | the bridge could not set the call up, or calls are disabled |
 
@@ -128,6 +135,12 @@ is a silent dead end. With it, the bridge's leg is hung up the instant it
 answers and the caller carries on in the dialplan into `ConfBridge()`. The
 bridge never answers speculatively, because `Dial()` hangs up every other branch
 with `ANSWERED_ELSEWHERE` as soon as one answers.
+
+**First answer wins, and the bridge decides it for its own legs.** It sends a
+200 on at most one leg per conference; the other legs are CANCELled by `Dial()`
+once that one answers, and their Matrix users see the call as answered
+elsewhere. The 200 waits for livekit-sip to have joined the conference, so a leg
+that loses never brings livekit-sip in.
 
 A channel inside `ConfBridge()` cannot also `Dial()`, so the order is fixed:
 Dial first, ConfBridge after.
@@ -146,8 +159,10 @@ media either.
 
 Every call that ends puts one message in its portal, sent as the caller's
 ghost: `Missed call`, `Call declined`, `Incoming call — 1m 20s`,
-`Outgoing call — 1m 20s`, `Outgoing call — no answer`, or
-`Call failed — <reason>` when the bridge itself could not carry it. It is a
+`Outgoing call — 1m 20s`, `Outgoing call — no answer`,
+`Answered by <name>` in the room of a recipient who did not pick up while
+someone else did, or `Call failed — <reason>` when the bridge itself could not
+carry it. It is a
 plain message rather than a notice, because that is what gives the room an
 unread badge.
 
@@ -212,8 +227,16 @@ send one that would not.
   that is not a line name (anything with a dot in it, so any trunk hostname or
   address) is ignored and the message keys the line-less portal, as it did
   before lines. A line name therefore must not contain a dot.
+- The recipient header (`sip.recipient_header`, `X-Matrix-Recipient` by default)
+  names the Matrix user the text is for. **Send one MESSAGE per recipient**; each
+  lands in that person's own room. Absent means the default recipient. A user
+  `bridge.permissions` gives no `login` is answered 403, an unusable value or no
+  default 404, so the server sees the refusal.
 - **From the bridge**: to `messages.outbound_to` with `{number}` replaced by the
-  destination as the portal ID spells it, from `messages.outbound_from`.
+  destination as the portal ID spells it. The `From` is `messages.outbound_from`
+  with its **host** replaced by the portal's line (`sip:+15551234567@home`),
+  mirroring the inbound side; a portal without a line sends it unchanged. The
+  display name is the sending Matrix user's MXID.
 - chan_sip needs `accept_outofcall_message=yes` and an
   `outofcall_message_context`, globally and on the bridge's peer, or an inbound
   MESSAGE is refused before it reaches any dialplan.
@@ -224,14 +247,20 @@ send one that would not.
 
 Illustrative only, and not part of the bridge: it shows the shape the contract
 above expects. The application and option names were checked against the
-Asterisk reference, but the flow has never been run end to end.
+Asterisk reference, but the flow has never been run end to end, and the two
+constructs that carry the recipient (the `b()` pre-dial gosub adding a header
+per leg, and `MESSAGE_DATA()` setting one on a text) are unverified.
 
 ```
-; ---- inbound: ring the bridge alongside the desk phone -------------------
+; ---- inbound: ring the desk phone and one leg per Matrix recipient --------
+; One peer per recipient (matrixbridge-alice, matrixbridge-bob, ...), all
+; pointing at the bridge. The b() pre-dial gosub runs on each callee channel
+; and adds that leg's recipient header; it is unverified that SIPAddHeader
+; there behaves like this.
 [from-trunk]
 exten => _+X.,1,Set(CONF=sip-${FILTER(0-9,${EXTEN})})
  same => n,SIPAddHeader(X-Conference: ${CONF})
- same => n,Dial(SIP/deskphone&SIP/matrixbridge/${EXTEN},30,U(matrix-answered))
+ same => n,Dial(SIP/deskphone&SIP/matrixbridge-alice/${EXTEN}&SIP/matrixbridge-bob/${EXTEN},30,U(matrix-answered)b(matrix-leg^s^1))
  same => n,GotoIf($["${MATRIX_ANSWERED}"="1"]?conf)
  same => n,Hangup()
  same => n(conf),ConfBridge(${CONF},default_bridge,matrix_caller)
@@ -240,10 +269,15 @@ exten => _+X.,1,Set(CONF=sip-${FILTER(0-9,${EXTEN})})
 ; because end_marked only fires when the marked user (livekit-sip) leaves.
 exten => h,1,System(asterisk -rx "confbridge kick ${CONF} all")
 
+; Pre-dial, on each bridge leg: the recipient comes from the peer's name.
+[matrix-leg]
+exten => s,1,SIPAddHeader(X-Matrix-Recipient: ${DB(matrix-recipient/${CHANNEL(peername)})})
+ same => n,Return()
+
 ; Runs on whichever leg answered. CONTINUE hangs that leg up and lets the
 ; caller carry on in the dialplan instead of being bridged to it.
 [matrix-answered]
-exten => s,1,GotoIf($["${CHANNEL(peername)}"!="matrixbridge"]?done)
+exten => s,1,GotoIf($["${CUT(CHANNEL(peername),-,1)}"!="matrixbridge"]?done)
  same => n,Set(MASTER_CHANNEL(MATRIX_ANSWERED)=1)
  same => n,Set(GOSUB_RESULT=CONTINUE)
  same => n(done),Return()
@@ -269,9 +303,13 @@ exten => _sip-X.,1,ConfBridge(${EXTEN},default_bridge,matrix_caller)
 ; because livekit-sip is the marked user. See "Ending a call".
 exten => h,1,System(asterisk -rx "confbridge kick ${EXTEN} all")
 
-; ---- inbound text --------------------------------------------------------
+; ---- inbound text: one MESSAGE per recipient -----------------------------
+; Setting a custom header with MESSAGE_DATA() is unverified.
 [messages-in]
-exten => _.,1,MessageSend(sip:${EXTEN}@matrix-sip-bridge.example.com:5060,${MESSAGE(from)})
+exten => _.,1,Set(MESSAGE_DATA(X-Matrix-Recipient)=@alice:example.com)
+ same => n,MessageSend(sip:${EXTEN}@matrix-sip-bridge.example.com:5060,${MESSAGE(from)})
+ same => n,Set(MESSAGE_DATA(X-Matrix-Recipient)=@bob:example.com)
+ same => n,MessageSend(sip:${EXTEN}@matrix-sip-bridge.example.com:5060,${MESSAGE(from)})
  same => n,Hangup()
 ```
 
@@ -304,21 +342,43 @@ bridgev2 sections (`homeserver`, `appservice`, `database`, `bridge`, `logging`)
 are documented by mautrix; the `network` section is this bridge's and is
 commented in [pkg/connector/example-config.yaml](pkg/connector/example-config.yaml).
 
-Two settings outside the `network` section are not optional. There is no
-per-user SIP account, so every Matrix user shares one login and reaches it
-through relay mode:
+### Per-user logins
 
-```yaml
+Every Matrix user has their own login and their own rooms: a DM portal per
+number and a space per line. There is no sign-up and no relay mode.
+
+- **Who can be named.** The recipient header may name any user
+  `bridge.permissions` gives `login`, which is the `user` and `admin` levels. The
+  first call or text naming a permitted user creates their login and connects it;
+  anyone else is refused with a log line (SIP 403). A header that is not an MXID
+  is 404. Users who prefer to can still run `login` in the management room, which
+  creates the same login.
+- **Relay is not needed.** `bridge.relay` and `default_relays: [sip]` can be
+  removed. If the far end is SMS, the `relay.message_formats` prefix no longer
+  applies either.
+- **No header** means the default recipient: the owner of the old shared login
+  (see below), kept in bridgev2's key-value table.
+- Double puppeting is unchanged, and still required for calls (next section).
+
+### Upgrading from a shared login
+
+Before per-user logins, one shared login named `sip` owned every room. At the
+start of the first run of this version, before the SIP endpoint listens, the
 bridge:
-    relay:
-        enabled: true
-        default_relays: [sip]
-```
 
-Without them the bridge starts, logs a warning and silently drops every message
-from anyone but the one user who logged in. If the far end is SMS, blank the
-`relay.message_formats` templates too: they prefix each message with the
-sender's name, which wastes a length-limited message.
+1. makes that login's owner the default recipient and creates their own login;
+2. moves every room that had no owner to that login, keeping the same Matrix
+   rooms, their history and their line spaces, and moves the owner's
+   per-room state (preferred, in-space, read marker) with them;
+3. moves the owner's personal space to the new login, then removes the old one
+   without touching any room.
+
+It is idempotent: with nothing left to move it does nothing. It never deletes,
+tombstones or duplicates a room. If the owner's new login already has a room for
+the same number, that one portal is skipped with a warning and the old login is
+kept until the clash is resolved by hand; everything else is moved regardless.
+With no old login and rooms still unowned, the rooms are left alone with a
+warning, because no owner is known.
 
 ### Double puppeting is required for calls
 
@@ -547,7 +607,9 @@ image.
 main.go                    mxmain.BridgeMain: flags, config, -g registration
 cmd/callaudit/             the end-to-end audio check: a livekit-sip log in, a verdict out
 pkg/connector/             bridgev2 NetworkConnector and NetworkAPI (messaging)
-  connector.go               lifecycle, static login, event-processor wiring
+  connector.go               lifecycle, login loading, event-processor wiring
+  logins.go                  recipient -> the user's own login, created on first mention
+  migrate.go                 startup move of the old shared login's rooms to its owner
   client.go                  inbound and outbound SIP MESSAGE
   commands.go                !dial, resolving a number to the portal it has
   config.go                  network config struct and upgrader

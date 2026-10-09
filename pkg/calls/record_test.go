@@ -46,6 +46,7 @@ func TestCallRecordsSayWhatHappened(t *testing.T) {
 		{"outgoing", database.Call{Direction: database.DirectionOutbound, State: database.StateBridged, UpdatedAt: answered}, callEnd{}, "Outgoing call — 1m 20s"},
 		{"unanswered outgoing", database.Call{Direction: database.DirectionOutbound, State: database.StateRinging}, callEnd{}, "Outgoing call — no answer"},
 		{"failed", database.Call{Direction: database.DirectionInbound, State: database.StateRinging}, callEnd{Failure: "no route"}, "Call failed — no route"},
+		{"answered elsewhere", database.Call{Direction: database.DirectionInbound, State: database.StateRinging}, callEnd{AnsweredBy: "Bob"}, "Answered by Bob"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := callRecordBody(&tc.call, tc.end, now); got != tc.want {
@@ -67,12 +68,15 @@ func TestEveryCallHasAnOutcome(t *testing.T) {
 		metrics.OutcomeDeclined: true,
 		metrics.OutcomeFailed:   true,
 		metrics.OutcomeStale:    true,
+
+		metrics.OutcomeAnsweredElsewhere: true,
 	}
 	ends := map[string]callEnd{
-		"plain":    {},
-		"declined": {Declined: true},
-		"failure":  {Failure: "no route"},
-		"quiet":    {Quiet: true},
+		"plain":     {},
+		"declined":  {Declined: true},
+		"failure":   {Failure: "no route"},
+		"quiet":     {Quiet: true},
+		"elsewhere": {AnsweredBy: "Bob"},
 	}
 	for _, direction := range []database.CallDirection{database.DirectionInbound, database.DirectionOutbound} {
 		for _, state := range []database.CallState{database.StateRinging, database.StateBridged, database.StateEnded} {
@@ -246,8 +250,9 @@ func TestAFailedCallIsReportedInTheRoom(t *testing.T) {
 	h := newHarness(t)
 	h.trunkID.Store(nil)
 
-	leg := newFakeInboundLeg()
-	h.HandleInboundCall(t.Context(), leg)
+	ic := h.ring(t, "", testCaller, "Alice")
+	h.join(ic.room, testCaller)
+	<-ic.done
 
 	if got := h.intent.bodies(); len(got) != 1 || got[0] != "Call failed — no route" {
 		t.Fatalf("the room was told %v, want one \"Call failed — no route\"", got)

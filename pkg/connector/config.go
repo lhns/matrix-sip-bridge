@@ -34,19 +34,12 @@ type MessageConfig struct {
 	// OutboundTo is the SIP URI template for outbound messages. "{number}" is
 	// replaced with the E.164 destination including the plus.
 	OutboundTo string `yaml:"outbound_to"`
-	// OutboundFrom is the From URI presented on outbound messages.
+	// OutboundFrom is the From URI presented on outbound messages. For a
+	// portal on a line, its host is replaced by the line.
 	OutboundFrom string `yaml:"outbound_from"`
 	// MaxLength is advertised to Matrix clients as the room's text limit.
 	MaxLength int `yaml:"max_length"`
 }
-
-// LoginID is the single static UserLogin the bridge runs under.
-//
-// There are no per-user accounts on the SIP side: there is one endpoint and
-// one trunk, so every Matrix user shares it. Relay mode plus this fixed login
-// is what makes that expressible in bridgev2, which otherwise assumes one
-// remote account per Matrix user.
-const LoginID = "sip"
 
 // LoginFlowID is the ID of the only login flow.
 const LoginFlowID = "sip"
@@ -65,6 +58,7 @@ func upgradeConfig(helper configupgrade.Helper) {
 	helper.Copy(configupgrade.Int, "sip", "media_port")
 	helper.Copy(configupgrade.Str, "sip", "conference_header")
 	helper.Copy(configupgrade.Str, "sip", "caller_header")
+	helper.Copy(configupgrade.Str, "sip", "recipient_header")
 	helper.Copy(configupgrade.Bool, "sip", "register", "enabled")
 	helper.Copy(configupgrade.Str, "sip", "register", "server")
 	helper.Copy(configupgrade.Str, "sip", "register", "password")

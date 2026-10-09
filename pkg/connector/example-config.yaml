@@ -37,6 +37,12 @@ sip:
     # server can apply its own policy to them. Empty sends nothing.
     caller_header: ""
 
+    # Header on an inbound INVITE or MESSAGE naming the Matrix user it is for,
+    #   X-Matrix-Recipient: @alice:example.com
+    # The user gets their own login and rooms the first time they are named, if
+    # bridge.permissions allows them to log in. Absent: the default recipient.
+    recipient_header: X-Matrix-Recipient
+
     # Registration. A SIP server that has the bridge as a static peer needs
     # none, which is the simpler deployment.
     register:
@@ -51,7 +57,9 @@ messages:
     # URI template for outbound messages. {number} is replaced with the
     # destination in E.164 including the leading plus.
     outbound_to: sip:{number}@pbx.example.com
-    # From URI presented on outbound messages.
+    # From URI presented on outbound messages. For a portal on a line the host
+    # is replaced by the line (sip:+15551234567@home), mirroring inbound texts;
+    # the sending Matrix user is the display name.
     outbound_from: sip:+15551234567@example.com
     # Advertised to Matrix clients as the room's text limit.
     max_length: 1600

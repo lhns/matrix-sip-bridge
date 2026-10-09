@@ -340,6 +340,11 @@ func TestTakeNotificationsIsExhaustive(t *testing.T) {
 // the dialplan hangs the leg up the moment it is answered.
 type fakeInboundLeg struct {
 	rec *recorder
+	// recipient is the recipient header the leg arrived with.
+	recipient string
+	// onAnswer runs as the 200 goes out, for a test about what had to happen
+	// before it.
+	onAnswer func()
 	// conference overrides the header the leg arrived with, for a test about
 	// what the bridge does with one it should refuse.
 	conference string
@@ -355,7 +360,8 @@ func newFakeInboundLeg() *fakeInboundLeg {
 	return &fakeInboundLeg{done: make(chan struct{})}
 }
 
-func (l *fakeInboundLeg) From() string { return "sip:caller@example.com" }
+func (l *fakeInboundLeg) From() string      { return "sip:caller@example.com" }
+func (l *fakeInboundLeg) Recipient() string { return l.recipient }
 func (l *fakeInboundLeg) Conference() string {
 	if l.conference != "" {
 		return l.conference
@@ -395,6 +401,9 @@ func (l *fakeInboundLeg) Finished() bool {
 
 func (l *fakeInboundLeg) Answer() error {
 	l.rec.add("200")
+	if l.onAnswer != nil {
+		l.onAnswer()
+	}
 	l.mu.Lock()
 	l.answered++
 	l.mu.Unlock()
@@ -420,36 +429,16 @@ func (l *fakeInboundLeg) state() (int, []int) {
 // waitForMatrix must see an answer that arrived before it started waiting.
 // HandleInboundCall says why a lost one cannot be recovered.
 func TestAnswerArrivingBeforeTheWaitIsNotLost(t *testing.T) {
-	s := &Subsystem{
-		db:       testDatabase(t),
-		log:      zerolog.Nop(),
-		answered: map[string]chan struct{}{},
-		declined: map[string]chan struct{}{},
-		ended:    map[string]chan struct{}{},
-	}
-	s.cfg.RingTimeout = 5 * time.Second
-
-	callID := newCallID()
-	waiters := s.waitersFor(callID)
-	defer s.forgetWaiters(callID)
-
-	call := &database.Call{
-		CallID:     callID,
-		PortalID:   "15551234567",
-		RoomID:     "!portal:example.com",
-		Direction:  database.DirectionInbound,
-		Conference: "sip-15551234567",
-		State:      database.StateRinging,
-	}
-	if err := s.db.Call.Insert(t.Context(), call); err != nil {
-		t.Fatalf("insert call: %v", err)
-	}
+	h := newHarness(t)
+	call := h.insertRinging(t)
+	waiters := h.waitersFor(call.CallID)
+	defer h.forgetWaiters(call.CallID)
 
 	// The answer lands while the call is still being set up.
-	s.signalAnswer(callID)
+	h.signalAnswer(call.CallID, testCaller)
 
 	leg := newFakeInboundLeg()
-	s.waitForMatrix(t.Context(), call, leg, zerolog.Nop(), waiters)
+	h.waitForMatrix(t.Context(), call, leg, zerolog.Nop(), waiters)
 
 	answered, rejects := leg.state()
 	if answered != 1 {
@@ -460,5 +449,8 @@ func TestAnswerArrivingBeforeTheWaitIsNotLost(t *testing.T) {
 	}
 	if call.State != database.StateBridged {
 		t.Errorf("call state = %q, want %q", call.State, database.StateBridged)
+	}
+	if call.MatrixUser != testCaller {
+		t.Errorf("call answered by %q, want %q", call.MatrixUser, testCaller)
 	}
 }

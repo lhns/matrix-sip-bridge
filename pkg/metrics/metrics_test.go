@@ -12,7 +12,7 @@ import (
 // families is what /metrics has to carry before anything has happened, and how
 // many series each family is pre-initialised with.
 var families = map[string]int{
-	"sip_bridge_calls_total":                  10, // 2 directions x 5 outcomes
+	"sip_bridge_calls_total":                  12, // 2 directions x 6 outcomes
 	"sip_bridge_call_setup_seconds":           2,  // 2 directions
 	"sip_bridge_sip_registered":               1,
 	"sip_bridge_trunk_reconcile_total":        2,

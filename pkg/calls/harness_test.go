@@ -53,6 +53,7 @@ func (r *recorder) all() []string {
 
 // sentEvent is one thing the ghost put in the room.
 type sentEvent struct {
+	RoomID   id.RoomID
 	Type     event.Type
 	StateKey string
 	State    bool
@@ -100,12 +101,12 @@ func (f *fakeIntent) record(evt sentEvent) (*mautrix.RespSendEvent, error) {
 	return &mautrix.RespSendEvent{EventID: evtID}, nil
 }
 
-func (f *fakeIntent) SendState(_ context.Context, _ id.RoomID, eventType event.Type, stateKey string, content *event.Content, _ time.Time) (*mautrix.RespSendEvent, error) {
-	return f.record(sentEvent{Type: eventType, StateKey: stateKey, State: true, Content: content})
+func (f *fakeIntent) SendState(_ context.Context, roomID id.RoomID, eventType event.Type, stateKey string, content *event.Content, _ time.Time) (*mautrix.RespSendEvent, error) {
+	return f.record(sentEvent{RoomID: roomID, Type: eventType, StateKey: stateKey, State: true, Content: content})
 }
 
-func (f *fakeIntent) SendMessage(_ context.Context, _ id.RoomID, eventType event.Type, content *event.Content, _ *bridgev2.MatrixSendExtra) (*mautrix.RespSendEvent, error) {
-	return f.record(sentEvent{Type: eventType, Content: content})
+func (f *fakeIntent) SendMessage(_ context.Context, roomID id.RoomID, eventType event.Type, content *event.Content, _ *bridgev2.MatrixSendExtra) (*mautrix.RespSendEvent, error) {
+	return f.record(sentEvent{RoomID: roomID, Type: eventType, Content: content})
 }
 
 func (f *fakeIntent) events() []sentEvent {
@@ -125,6 +126,31 @@ func (f *fakeIntent) count(eventType event.Type) int {
 	return n
 }
 
+// countIn is count for one room.
+func (f *fakeIntent) countIn(roomID id.RoomID, eventType event.Type) int {
+	n := 0
+	for _, evt := range f.events() {
+		if evt.Type == eventType && evt.RoomID == roomID {
+			n++
+		}
+	}
+	return n
+}
+
+// bodiesIn is bodies for one room.
+func (f *fakeIntent) bodiesIn(roomID id.RoomID) []string {
+	var out []string
+	for _, evt := range f.events() {
+		if evt.Type != event.EventMessage || evt.RoomID != roomID {
+			continue
+		}
+		if content, ok := evt.Content.Parsed.(*event.MessageEventContent); ok {
+			out = append(out, content.Body)
+		}
+	}
+	return out
+}
+
 // redactions returns the events the ghost redacted, which is how a ring
 // notification is retracted.
 func (f *fakeIntent) redactions() []id.EventID {
@@ -140,51 +166,107 @@ func (f *fakeIntent) redactions() []id.EventID {
 	return out
 }
 
+// testBob is a second Matrix user, with a room of their own per number.
+// testCaller is the default recipient.
+const testBob = id.UserID("@bob:example.com")
+
 // fakeMatrix is the bridgev2 side of the world.
 type fakeMatrix struct {
 	rec    *recorder
 	intent *fakeIntent
 
+	// portal is the default recipient's portal. Any other owner gets a room
+	// of their own, made on first use.
 	portal    Portal
 	portalErr error
-	members   map[id.UserID]*event.MemberEventContent
 
-	// portalIDs is what already exists on the bridge, which is what a !dial
-	// with no line resolves against.
-	portalIDs  []string
-	portalsErr error
+	// refused and unknown name recipient header values Recipient fails on.
+	refused map[string]bool
+	unknown map[string]bool
 
-	// asked records the portal IDs PortalRoom was called with. It is the only
-	// place a dial entry point's ID arithmetic is visible, the portal itself
-	// being fixed.
-	mu    sync.Mutex
-	asked []string
+	// portalIDs is what already exists on the bridge for the default
+	// recipient, which is what a !dial with no line resolves against;
+	// otherPortalIDs is the same for any other user.
+	portalIDs      []string
+	otherPortalIDs map[id.UserID][]string
+	portalsErr     error
+
+	mu sync.Mutex
+	// asked and askedOwners record what PortalRoom was called with. They are
+	// the only place a dial entry point's ID arithmetic is visible, the
+	// portal itself being fixed.
+	asked       []string
+	askedOwners []id.UserID
+	// rooms maps each owner to their room, and members is who is in it.
+	rooms   map[id.UserID]id.RoomID
+	members map[id.RoomID]map[id.UserID]*event.MemberEventContent
 }
 
 func newFakeMatrix(rec *recorder) *fakeMatrix {
-	return &fakeMatrix{
-		rec:    rec,
-		intent: newFakeIntent(rec),
-		portal: Portal{ID: "15551234567", MXID: "!portal:example.com"},
-		members: map[id.UserID]*event.MemberEventContent{
-			"@alice:example.com": {Membership: event.MembershipJoin},
-		},
+	f := &fakeMatrix{
+		rec:     rec,
+		intent:  newFakeIntent(rec),
+		portal:  Portal{ID: "15551234567", MXID: "!portal:example.com", Owner: testCaller},
+		refused: map[string]bool{},
+		unknown: map[string]bool{},
+		rooms:   map[id.UserID]id.RoomID{},
+		members: map[id.RoomID]map[id.UserID]*event.MemberEventContent{},
 	}
+	f.rooms[testCaller] = f.portal.MXID
+	f.members[f.portal.MXID] = map[id.UserID]*event.MemberEventContent{
+		testCaller: {Membership: event.MembershipJoin, Displayname: "Alice"},
+	}
+	return f
+}
+
+// roomOf returns an owner's room, making it, with the owner joined under the
+// given display name, on first use.
+func (f *fakeMatrix) roomOf(owner id.UserID, displayname string) id.RoomID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if owner == "" {
+		owner = testCaller
+	}
+	if room, ok := f.rooms[owner]; ok {
+		return room
+	}
+	room := id.RoomID("!" + strings.TrimPrefix(strings.SplitN(owner.String(), ":", 2)[0], "@") + "-room:example.com")
+	f.rooms[owner] = room
+	f.members[room] = map[id.UserID]*event.MemberEventContent{
+		owner: {Membership: event.MembershipJoin, Displayname: displayname},
+	}
+	return room
 }
 
 func (f *fakeMatrix) GhostIntent(context.Context, string) (GhostIntent, error) {
 	return f.intent, nil
 }
 
-func (f *fakeMatrix) PortalRoom(_ context.Context, portalID string) (Portal, error) {
+func (f *fakeMatrix) Recipient(_ context.Context, header string) (id.UserID, error) {
+	switch {
+	case f.refused[header]:
+		return "", ErrRecipientRefused
+	case f.unknown[header]:
+		return "", ErrUnknownRecipient
+	case header == "":
+		return testCaller, nil
+	}
+	return id.UserID(header), nil
+}
+
+func (f *fakeMatrix) PortalRoom(_ context.Context, portalID string, owner id.UserID) (Portal, error) {
 	f.rec.add("portal")
 	f.mu.Lock()
 	f.asked = append(f.asked, portalID)
+	f.askedOwners = append(f.askedOwners, owner)
 	f.mu.Unlock()
 	if f.portalErr != nil {
 		return Portal{}, f.portalErr
 	}
-	return f.portal, nil
+	if owner == "" || owner == testCaller {
+		return f.portal, nil
+	}
+	return Portal{ID: portalID, MXID: f.roomOf(owner, owner.String()), Owner: owner}, nil
 }
 
 // portalsAsked returns the portal IDs PortalRoom was called with.
@@ -194,18 +276,32 @@ func (f *fakeMatrix) portalsAsked() []string {
 	return append([]string(nil), f.asked...)
 }
 
-func (f *fakeMatrix) PortalIDs(context.Context) ([]string, error) {
+// ownersAsked returns the owners PortalRoom was called with.
+func (f *fakeMatrix) ownersAsked() []id.UserID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]id.UserID(nil), f.askedOwners...)
+}
+
+func (f *fakeMatrix) PortalIDs(_ context.Context, owner id.UserID) ([]string, error) {
 	if f.portalsErr != nil {
 		return nil, f.portalsErr
 	}
-	return f.portalIDs, nil
+	if owner == "" || owner == testCaller {
+		return f.portalIDs, nil
+	}
+	return f.otherPortalIDs[owner], nil
 }
 
 func (f *fakeMatrix) PortalByMXID(_ context.Context, roomID id.RoomID) (Portal, bool) {
-	if roomID != f.portal.MXID {
-		return Portal{}, false
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for owner, room := range f.rooms {
+		if room == roomID {
+			return Portal{ID: f.portal.ID, MXID: room, Owner: owner}, true
+		}
 	}
-	return f.portal, true
+	return Portal{}, false
 }
 
 func (f *fakeMatrix) BotMXID() id.UserID { return "@sipbot:example.com" }
@@ -214,8 +310,10 @@ func (f *fakeMatrix) IsGhost(userID id.UserID) bool {
 	return strings.HasPrefix(userID.String(), "@sip_")
 }
 
-func (f *fakeMatrix) Members(context.Context, id.RoomID) (map[id.UserID]*event.MemberEventContent, error) {
-	return f.members, nil
+func (f *fakeMatrix) Members(_ context.Context, roomID id.RoomID) (map[id.UserID]*event.MemberEventContent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.members[roomID], nil
 }
 
 // fakeOutboundLeg is the control leg of a call the bridge placed.
@@ -271,25 +369,25 @@ func (f *fakeTelephony) Invite(ctx context.Context, to, _ string, caller id.User
 type queryLog struct {
 	dbutil.DatabaseLogger
 
-	mu       sync.Mutex
-	rec      *recorder
-	byPortal int
+	mu     sync.Mutex
+	rec    *recorder
+	byRoom int
 }
 
 func (q *queryLog) QueryTiming(_ context.Context, _, query string, _ []any, _ int, _ time.Duration, _ error) {
 	q.mu.Lock()
 	rec := q.rec
-	if strings.Contains(query, "WHERE portal_id = ") {
-		q.byPortal++
+	if strings.Contains(query, "WHERE room_id = ") {
+		q.byRoom++
 	}
 	q.mu.Unlock()
 	rec.add("db")
 }
 
-func (q *queryLog) activeByPortal() int {
+func (q *queryLog) activeByRoom() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.byPortal
+	return q.byRoom
 }
 
 // harness is a subsystem wired to fakes on every side: bridgev2, LiveKit, the
@@ -329,7 +427,7 @@ func newHarness(t *testing.T) *harness {
 		lk:       lk.client(),
 		db:       db,
 		log:      zerolog.Nop(),
-		answered: map[string]chan struct{}{},
+		answered: map[string]chan id.UserID{},
 		declined: map[string]chan struct{}{},
 		ended:    map[string]chan struct{}{},
 		notifies: map[id.EventID]string{},
@@ -342,13 +440,19 @@ func newHarness(t *testing.T) *harness {
 	return &harness{Subsystem: s, rec: rec, mx: mx, intent: mx.intent, lk: lk, sip: sip, queries: queries}
 }
 
-// activeCall returns the call still in progress for the harness's portal, or
-// nil. "Ended" is the assertion most of these tests make.
+// activeCall returns the call still in progress in the harness's portal room,
+// or nil. "Ended" is the assertion most of these tests make.
 func (h *harness) activeCall(t *testing.T) *database.Call {
 	t.Helper()
-	call, err := h.db.Call.GetActiveByPortal(context.Background(), h.mx.portal.ID)
+	return h.activeCallIn(t, h.mx.portal.MXID)
+}
+
+// activeCallIn is activeCall for any room.
+func (h *harness) activeCallIn(t *testing.T, room id.RoomID) *database.Call {
+	t.Helper()
+	call, err := h.db.Call.GetActiveByRoom(context.Background(), room)
 	if err != nil {
-		t.Fatalf("GetActiveByPortal: %v", err)
+		t.Fatalf("GetActiveByRoom: %v", err)
 	}
 	return call
 }
@@ -362,6 +466,7 @@ func (h *harness) insertRinging(t *testing.T) *database.Call {
 		CallID:     callID,
 		PortalID:   h.mx.portal.ID,
 		RoomID:     h.mx.portal.MXID,
+		Receiver:   h.mx.portal.Owner,
 		Direction:  database.DirectionInbound,
 		Conference: h.conferenceFor(h.mx.portal.ID),
 		LKRoom:     LiveKitRoomName(h.mx.portal.MXID.String(), SlotRoom),

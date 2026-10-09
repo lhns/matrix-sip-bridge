@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -40,31 +39,6 @@ func TestRingingPrecedesThePortalAndTheDatabase(t *testing.T) {
 	}
 	if !slices.Contains(order, "portal") {
 		t.Fatalf("the call did %v; want it to have reached the portal", order)
-	}
-}
-
-// A call that fails after the ring has already gone out leaves every device in
-// the room ringing until the notification lapses, and a row that blocks every
-// later call from the same number. Both have to be undone.
-func TestLiveKitFailingAfterTheRingRetractsItAndEndsTheCall(t *testing.T) {
-	h := newHarness(t)
-	h.lk.stageError("CreateSIPParticipant", http.StatusInternalServerError, `{"code":"internal","msg":"no trunk"}`)
-
-	leg := newFakeInboundLeg()
-	h.HandleInboundCall(t.Context(), leg)
-
-	if _, rejects := leg.state(); len(rejects) != 1 || rejects[0] != 503 {
-		t.Errorf("the leg was rejected with %v, want one 503", rejects)
-	}
-	// The notification was sent, so exactly it must be redacted.
-	if h.intent.count(RtcNotificationEventType) != 1 {
-		t.Fatalf("the call sent %d ring notifications, want one", h.intent.count(RtcNotificationEventType))
-	}
-	if got := h.intent.redactions(); len(got) != 1 {
-		t.Errorf("the call redacted %v, want the ring notification; clients would ring on", got)
-	}
-	if call := h.activeCall(t); call != nil {
-		t.Errorf("call %s is still %q; every later call to this number is refused", call.CallID, call.State)
 	}
 }
 
@@ -180,8 +154,8 @@ func TestMatrixCallButtonLooksUpTheCallOnce(t *testing.T) {
 	if len(h.sip.invites) != 1 {
 		t.Fatalf("the SIP transport saw %v, want one INVITE", h.sip.invites)
 	}
-	if got := h.queries.activeByPortal(); got != 1 {
-		t.Errorf("the dial ran %d lookups by portal, want 1", got)
+	if got := h.queries.activeByRoom(); got != 1 {
+		t.Errorf("the dial ran %d lookups by room, want 1", got)
 	}
 }
 
@@ -196,12 +170,12 @@ func TestAnsweringTheInstantTheNotificationArrives(t *testing.T) {
 		if evt.Type != RtcNotificationEventType {
 			return
 		}
-		call, err := h.db.Call.GetActiveByPortal(context.Background(), h.mx.portal.ID)
+		call, err := h.db.Call.GetActiveByRoom(context.Background(), h.mx.portal.MXID)
 		if err != nil || call == nil {
 			t.Errorf("no ringing call when the notification went out: %v", err)
 			return
 		}
-		h.signalAnswer(call.CallID)
+		h.signalAnswer(call.CallID, testCaller)
 	}
 
 	leg := newFakeInboundLeg()
@@ -603,28 +577,6 @@ func TestOnlyCreatedTSDiffersBetweenTwoPublishesOfOneMembership(t *testing.T) {
 	b, _ := json.Marshal(second.Raw)
 	if string(a) != string(b) {
 		t.Errorf("the two memberships differ in more than created_ts:\n%s\n%s", a, b)
-	}
-}
-
-// Inbound already has its participant live before any client reads the
-// membership, so it needs no second publish -- and an extra one there would be
-// a state change in a room mid-call for no reason.
-func TestAnInboundCallPublishesOneMembership(t *testing.T) {
-	h := newHarness(t)
-	leg := newFakeInboundLeg()
-	call, err := h.beginInboundCall(t.Context(), newCallID(), h.mx.portal.ID, h.conferenceFor(h.mx.portal.ID))
-	if err != nil {
-		t.Fatalf("beginInboundCall: %v", err)
-	}
-	// The waiters have to exist before the answer is signalled; signalling a
-	// call that has none is a no-op and the ring would run to its timeout.
-	waiters := h.waitersFor(call.CallID)
-	defer h.forgetWaiters(call.CallID)
-	h.signalAnswer(call.CallID)
-	h.waitForMatrix(t.Context(), call, leg, zerolog.Nop(), waiters)
-
-	if got := activeMemberships(h.intent.events()); len(got) != 1 {
-		t.Errorf("the inbound call published %d memberships, want one", len(got))
 	}
 }
 

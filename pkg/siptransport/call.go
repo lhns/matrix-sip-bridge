@@ -26,6 +26,7 @@ type InboundCall struct {
 
 	from       string
 	conference string
+	recipient  string
 	offer      []byte
 
 	// cancel ends the context the INVITE handler runs on, so that context is
@@ -44,6 +45,10 @@ func (c *InboundCall) From() string { return c.from }
 // Conference is the value of the configured conference header, naming the
 // conference the caller will land in.
 func (c *InboundCall) Conference() string { return c.conference }
+
+// Recipient is the value of the configured recipient header: the Matrix user
+// this leg rings, or "" for none.
+func (c *InboundCall) Recipient() string { return c.recipient }
 
 // Done is closed when the leg is gone, by BYE, CANCEL or transaction failure.
 func (c *InboundCall) Done() <-chan struct{} { return c.done }
@@ -139,6 +144,7 @@ func (t *Transport) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		t:          t,
 		dlg:        dlg,
 		conference: strings.TrimSpace(headerValue(req, t.cfg.ConferenceHeader)),
+		recipient:  strings.TrimSpace(headerValue(req, t.cfg.RecipientHeader)),
 		offer:      req.Body(),
 		cancel:     cancel,
 		done:       make(chan struct{}),
