@@ -21,7 +21,9 @@ type Portal struct {
 	ID   string
 	MXID id.RoomID
 	// Owner is the Matrix user whose room it is. Empty for a portal from
-	// before per-user logins, which has no receiver.
+	// before per-user logins, which has no receiver. A login ID is the user's
+	// MXID string, which is what lets this stand in for the portal's receiver
+	// here, in database.Call.Receiver and in bridgev2's PortalKey.Receiver.
 	Owner id.UserID
 }
 

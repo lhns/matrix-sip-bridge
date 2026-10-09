@@ -18,12 +18,9 @@ import (
 // lineSpaceID is the space a portal belongs in, false for one that has none:
 // a space itself, or a number with no line.
 func lineSpaceID(portalID string) (networkid.PortalID, bool) {
-	if phonenum.IsSpaceID(portalID) {
+	kind, line := phonenum.KindOf(portalID)
+	if kind == phonenum.KindSpace {
 		return "", false
-	}
-	line := phonenum.LineFromDialID(portalID)
-	if line == "" {
-		line = phonenum.LineFromID(portalID)
 	}
 	space, err := phonenum.SpaceIDFor(line)
 	if err != nil {
