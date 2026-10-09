@@ -15,10 +15,14 @@ import (
 )
 
 // Portal is a portal room as the call subsystem needs it: the number it
-// bridges and the Matrix room that number's calls happen in.
+// bridges and the Matrix room that number's calls happen in. Every Matrix user
+// has a room of their own per number.
 type Portal struct {
 	ID   string
 	MXID id.RoomID
+	// Owner is the Matrix user whose room it is. Empty for a portal from
+	// before per-user logins, which has no receiver.
+	Owner id.UserID
 }
 
 // GhostIntent is the slice of bridgev2.MatrixAPI used to act as the ghost
@@ -54,15 +58,18 @@ type roomStateReader interface {
 type matrixSide interface {
 	// GhostIntent returns the Matrix API of the ghost representing a number.
 	GhostIntent(ctx context.Context, portalID string) (GhostIntent, error)
-	// PortalRoom returns the portal for a number, creating the Matrix room if
-	// it does not exist yet and repairing an older one that predates the
-	// call-capable power levels.
-	PortalRoom(ctx context.Context, portalID string) (Portal, error)
-	// PortalIDs lists the IDs of the portals that already have a Matrix room.
-	// bridgev2 has no number -> portal index, so a number is resolved to the
-	// lines it is already a conversation on by reading them all; see
+	// PortalRoom returns owner's portal for a number, creating the Matrix room
+	// if it does not exist yet and repairing an older one that predates the
+	// call-capable power levels. An empty owner is the default recipient.
+	PortalRoom(ctx context.Context, portalID string, owner id.UserID) (Portal, error)
+	// PortalIDs lists the IDs of owner's portals that already have a Matrix
+	// room. bridgev2 has no number -> portal index, so a number is resolved to
+	// the lines it is already a conversation on by reading them all; see
 	// portalIDForNumber.
-	PortalIDs(ctx context.Context) ([]string, error)
+	PortalIDs(ctx context.Context, owner id.UserID) ([]string, error)
+	// Recipient resolves a recipient header value to the Matrix user it names,
+	// with the errors of Logins.
+	Recipient(ctx context.Context, header string) (id.UserID, error)
 	// PortalByMXID maps a Matrix room back to the portal it is, reporting
 	// false for a room that is not one.
 	PortalByMXID(ctx context.Context, roomID id.RoomID) (Portal, bool)
@@ -101,15 +108,15 @@ func (b *bridgeSide) GhostIntent(ctx context.Context, portalID string) (GhostInt
 	return ghost.Intent, nil
 }
 
-func (b *bridgeSide) PortalRoom(ctx context.Context, portalID string) (Portal, error) {
-	key := networkid.PortalKey{ID: networkid.PortalID(portalID)}
+func (b *bridgeSide) PortalRoom(ctx context.Context, portalID string, owner id.UserID) (Portal, error) {
+	source, err := b.logins.Login(ctx, owner.String())
+	if err != nil {
+		return Portal{}, err
+	}
+	key := networkid.PortalKey{ID: networkid.PortalID(portalID), Receiver: source.ID}
 	portal, err := b.br.GetPortalByKey(ctx, key)
 	if err != nil {
 		return Portal{}, fmt.Errorf("get portal %s: %w", portalID, err)
-	}
-	source, err := b.logins.Login(ctx, "")
-	if err != nil {
-		return Portal{}, err
 	}
 	if portal.MXID == "" {
 		// The room info is left to bridgev2, which asks the login's
@@ -127,23 +134,37 @@ func (b *bridgeSide) PortalRoom(ctx context.Context, portalID string) (Portal, e
 	// before the room exists and caches itself as done. Nothing else ever
 	// rechecks the user's membership.
 	b.ensureUserInPortal(ctx, portal, source)
-	return Portal{ID: string(portal.ID), MXID: portal.MXID}, nil
+	return Portal{ID: string(portal.ID), MXID: portal.MXID, Owner: source.UserMXID}, nil
 }
 
 // PortalIDs reads every portal because bridgev2 indexes portals by key and by
 // MXID and by nothing else. Rows with no room are left out: a key with no room
 // is not a conversation to consolidate onto, and dialling it would create the
 // room anyway.
-func (b *bridgeSide) PortalIDs(ctx context.Context) ([]string, error) {
+func (b *bridgeSide) PortalIDs(ctx context.Context, owner id.UserID) ([]string, error) {
+	login, err := b.logins.Login(ctx, owner.String())
+	if err != nil {
+		return nil, err
+	}
 	portals, err := b.br.DB.Portal.GetAllWithMXID(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list portals: %w", err)
 	}
 	ids := make([]string, 0, len(portals))
 	for _, portal := range portals {
-		ids = append(ids, string(portal.ID))
+		if portal.Receiver == login.ID {
+			ids = append(ids, string(portal.ID))
+		}
 	}
 	return ids, nil
+}
+
+func (b *bridgeSide) Recipient(ctx context.Context, header string) (id.UserID, error) {
+	login, err := b.logins.Login(ctx, header)
+	if err != nil {
+		return "", err
+	}
+	return login.UserMXID, nil
 }
 
 func (b *bridgeSide) PortalByMXID(ctx context.Context, roomID id.RoomID) (Portal, bool) {
@@ -151,7 +172,13 @@ func (b *bridgeSide) PortalByMXID(ctx context.Context, roomID id.RoomID) (Portal
 	if err != nil || portal == nil {
 		return Portal{}, false
 	}
-	return Portal{ID: string(portal.ID), MXID: portal.MXID}, true
+	out := Portal{ID: string(portal.ID), MXID: portal.MXID}
+	if portal.Receiver != "" {
+		if login := b.br.GetCachedUserLoginByID(portal.Receiver); login != nil {
+			out.Owner = login.UserMXID
+		}
+	}
+	return out, true
 }
 
 func (b *bridgeSide) BotMXID() id.UserID {
