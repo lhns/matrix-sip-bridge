@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.26-alpine AS build
+# Docker Hub's official image via AWS's mirror: Docker Hub rate-limits the shared CI runners.
+FROM public.ecr.aws/docker/library/golang:1.26-alpine AS build
 
 # CGO is required, not optional: bridgev2's mxmain imports mattn/go-sqlite3
 # unconditionally, so CGO_ENABLED=0 does not compile. The binary is still
