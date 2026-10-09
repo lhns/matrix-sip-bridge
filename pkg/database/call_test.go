@@ -171,3 +171,30 @@ func TestUpgradeFromTheFirstSchemaKeepsRows(t *testing.T) {
 		t.Errorf("the old row has receiver %q and user %q, want both empty", got.Receiver, got.MatrixUser)
 	}
 }
+
+// A row a crashed run left bridged must not block answering the same
+// conference once the next start has cleared it.
+func TestEndAllUnblocksTheConference(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	old := insertLeg(t, db, "old", "sip-1", "!a:example.com", "@alice:example.com")
+	if won, err := db.Call.Answer(ctx, old, "@alice:example.com"); err != nil || !won {
+		t.Fatalf("seeding the bridged row: won=%v err=%v", won, err)
+	}
+	fresh := insertLeg(t, db, "fresh", "sip-1", "!b:example.com", "@bob:example.com")
+	if won, _ := db.Call.Answer(ctx, fresh, "@bob:example.com"); won {
+		t.Fatal("a bridged row on the conference did not block the answer")
+	}
+
+	n, err := db.Call.EndAll(ctx)
+	if err != nil || n != 2 {
+		t.Fatalf("EndAll = %d, %v, want 2 open rows ended", n, err)
+	}
+	if n, _ := db.Call.EndAll(ctx); n != 0 {
+		t.Errorf("a second EndAll ended %d rows, want 0", n)
+	}
+	again := insertLeg(t, db, "again", "sip-1", "!b:example.com", "@bob:example.com")
+	if won, err := db.Call.Answer(ctx, again, "@bob:example.com"); err != nil || !won {
+		t.Errorf("answer after EndAll: won=%v err=%v, want it to win", won, err)
+	}
+}

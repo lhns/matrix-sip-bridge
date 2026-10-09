@@ -243,8 +243,12 @@ func (s *Subsystem) Start(ctx context.Context, reg EventRegistrar) error {
 	if err != nil {
 		return fmt.Errorf("list calls from the last run: %w", err)
 	}
-	if err := s.db.Call.EndAll(ctx); err != nil {
+	ended, err := s.db.Call.EndAll(ctx)
+	if err != nil {
 		return fmt.Errorf("clear stale calls: %w", err)
+	}
+	if ended > 0 {
+		s.log.Info().Int64("calls", ended).Msg("Ended calls left open by the last run")
 	}
 	s.sweepStaleMemberships(ctx, stale)
 

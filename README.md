@@ -52,6 +52,9 @@ spaces are added to that space too, and a new portal room goes only into its
 line's space — but a room already listed in the personal space keeps that
 entry, so it appears in both.
 
+A room that names its space but was never listed in it, because creating the
+space or the link failed, is linked by its next resync.
+
 `line_spaces: false` stops new rooms naming a parent. It does not undo
 anything: the space rooms, their `m.space.child` entries and the rooms already
 in them stay as they are, and a portal that is already a space is still
@@ -498,6 +501,12 @@ the Matrix side out of the Service with it.
 The endpoint is served on the appservice router, so it does not exist when the
 bridge is configured for appservice websocket transport or `no_server`.
 
+### Calls left open by a restart
+
+Live calls are held in memory only, so before the SIP endpoint accepts a call
+the bridge marks every call row not yet ended as ended and logs how many. A row
+a crash left behind therefore never blocks answering a call to the same number.
+
 ### Metrics
 
 `GET /metrics` is served on the **appservice** port too, beside the readiness
@@ -643,7 +652,8 @@ pkg/connector/             bridgev2 NetworkConnector and NetworkAPI (messaging)
   logins.go                  recipient -> the user's own login, created on first mention
   migrate.go                 startup move of the old shared login's rooms to its owner
   spaces.go                  a portal's line space under its own receiver, and its repair
-  dialroom.go                line members, and the dial room that opens a number's room
+  dialroom.go                the dial room that opens a number's room
+  linemembers.go             line_members: the logins, and the space and dial room each gets
   client.go                  inbound and outbound SIP MESSAGE
   commands.go                !dial, resolving a number to the portal it has
   config.go                  network config struct and upgrader

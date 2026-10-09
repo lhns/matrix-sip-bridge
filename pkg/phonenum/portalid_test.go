@@ -313,3 +313,31 @@ func TestDialIDIsALineRoomAndNotANumber(t *testing.T) {
 		t.Errorf("DialIDFor accepted a hostname: %v", err)
 	}
 }
+
+func TestKindOf(t *testing.T) {
+	tests := []struct {
+		id       string
+		wantKind IDKind
+		wantLine string
+	}{
+		{"home-space", KindSpace, "home"},
+		{"office-main-space", KindSpace, "office-main"},
+		{"home-dial", KindDial, "home"},
+		{"office-main-dial", KindDial, "office-main"},
+		{"home-+15551234567", KindNumber, "home"},
+		{"office-main-+15551234567", KindNumber, "office-main"},
+		{"line2-1001", KindNumber, "line2"},
+		{"15551234567", KindNumber, ""},
+		{"", KindNumber, ""},
+		{"-space", KindNumber, ""},
+		{"ho me-space", KindNumber, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.id, func(t *testing.T) {
+			kind, line := KindOf(tt.id)
+			if kind != tt.wantKind || line != tt.wantLine {
+				t.Errorf("KindOf(%q) = (%v, %q), want (%v, %q)", tt.id, kind, line, tt.wantKind, tt.wantLine)
+			}
+		})
+	}
+}

@@ -193,6 +193,31 @@ func IsLineRoomID(id string) bool {
 	return IsSpaceID(id) || LineFromDialID(id) != ""
 }
 
+// IDKind says what a portal ID names.
+type IDKind int
+
+const (
+	// KindNumber is a conversation with a phone number, on a line or not.
+	KindNumber IDKind = iota
+	// KindSpace is a line's space.
+	KindSpace
+	// KindDial is a line's dial room.
+	KindDial
+)
+
+// KindOf classifies a portal ID and returns its line: the line a space or dial
+// room names, or the one a number's ID is scoped to, empty for a number with
+// none. Callers branch on this instead of testing each spelling in turn.
+func KindOf(id string) (IDKind, string) {
+	if line := LineFromSpaceID(id); line != "" {
+		return KindSpace, line
+	}
+	if line := LineFromDialID(id); line != "" {
+		return KindDial, line
+	}
+	return KindNumber, LineFromID(id)
+}
+
 func lineRoomID(line, suffix string) (string, error) {
 	if !lineName.MatchString(line) {
 		return "", fmt.Errorf("%w: %q", ErrBadLine, line)

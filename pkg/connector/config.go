@@ -2,6 +2,7 @@ package connector
 
 import (
 	_ "embed"
+	"slices"
 
 	"go.mau.fi/util/configupgrade"
 	"maunium.net/go/mautrix/id"
@@ -132,4 +133,16 @@ func (c *Config) applyDefaults() {
 	if c.Calls.LiveKit.TrunkReconcileInterval <= 0 {
 		c.Calls.LiveKit.TrunkReconcileInterval = calls.DefaultTrunkReconcileInterval
 	}
+}
+
+// linesOf lists the lines user is a member of.
+func (c *Config) linesOf(user id.UserID) []string {
+	var lines []string
+	for line, users := range c.LineMembers {
+		if slices.Contains(users, user) {
+			lines = append(lines, line)
+		}
+	}
+	slices.Sort(lines)
+	return lines
 }

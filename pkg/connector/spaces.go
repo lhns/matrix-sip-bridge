@@ -18,12 +18,9 @@ import (
 // lineSpaceID is the space a portal belongs in, false for one that has none:
 // a space itself, or a number with no line.
 func lineSpaceID(portalID string) (networkid.PortalID, bool) {
-	if phonenum.IsSpaceID(portalID) {
+	kind, line := phonenum.KindOf(portalID)
+	if kind == phonenum.KindSpace {
 		return "", false
-	}
-	line := phonenum.LineFromDialID(portalID)
-	if line == "" {
-		line = phonenum.LineFromID(portalID)
 	}
 	space, err := phonenum.SpaceIDFor(line)
 	if err != nil {
@@ -42,7 +39,8 @@ func lineSpaceID(portalID string) (networkid.PortalID, bool) {
 func (sc *SIPClient) lineParent(space networkid.PortalID) bridgev2.ExtraUpdater[*bridgev2.Portal] {
 	return func(ctx context.Context, portal *bridgev2.Portal) bool {
 		want := networkid.PortalKey{ID: space, Receiver: portal.Receiver}
-		if portal.ParentKey == want {
+		keyed := portal.ParentKey == want
+		if keyed && portal.MXID == "" {
 			return false
 		}
 		br := portal.Bridge
@@ -52,7 +50,12 @@ func (sc *SIPClient) lineParent(space networkid.PortalID) bridgev2.ExtraUpdater[
 			log.Err(err).Object("parent_key", want).Msg("Failed to get the line's space")
 			return false
 		}
-		if portal.MXID != "" && portal.InSpace && portal.Parent != nil && portal.Parent.MXID != "" {
+		// Keyed is not linked: creating the space or listing the room may have
+		// failed, and only a resync that finds it unlinked retries.
+		if keyed && portal.InSpace && parent.MXID != "" {
+			return false
+		}
+		if !keyed && portal.MXID != "" && portal.InSpace && portal.Parent != nil && portal.Parent.MXID != "" {
 			if err := linkToParent(ctx, br, portal.Parent.MXID, portal.MXID, true); err != nil {
 				log.Err(err).Stringer("old_space_mxid", portal.Parent.MXID).Msg("Failed to remove the room from its old space")
 			}

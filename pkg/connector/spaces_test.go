@@ -417,3 +417,54 @@ func TestTheSharedLoginGetsNoLineRooms(t *testing.T) {
 		t.Errorf("%d portals under the shared login", n)
 	}
 }
+
+// A room that names the right space but was never listed in it, because
+// creating the space or the link failed, is linked by the next resync; one
+// already linked sends nothing.
+func TestResyncRetriesAFailedSpaceLink(t *testing.T) {
+	br, sc := newTestBridge(t, ownerPermissions())
+	sc.Config.LineSpaces = true
+	ctx := context.Background()
+	if err := br.DB.User.Insert(ctx, &database.User{BridgeID: br.ID, MXID: testOwner}); err != nil {
+		t.Fatal(err)
+	}
+	loginID := loginIDFor(testOwner)
+	if err := br.DB.UserLogin.Insert(ctx, &database.UserLogin{
+		BridgeID: br.ID, UserMXID: testOwner, ID: loginID, RemoteName: "SIP",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	login, err := br.GetExistingUserLoginByID(ctx, loginID)
+	if err != nil || login == nil {
+		t.Fatalf("login = %v, %v", login, err)
+	}
+	spaceKey := networkid.PortalKey{ID: spaceID, Receiver: loginID}
+	room := networkid.PortalKey{ID: "home-+15551230001", Receiver: loginID}
+	child := testPortal(room, "!child:example.com", database.RoomTypeDM)
+	child.ParentKey = spaceKey
+	for _, p := range []*database.Portal{
+		testPortal(spaceKey, "!space:example.com", database.RoomTypeSpace), child,
+	} {
+		if err := br.DB.Portal.Insert(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bot := botOf(br)
+
+	resync(t, br, login, room)
+	if p := portalAt(t, br, string(room.ID), string(loginID)); p == nil || !p.InSpace {
+		t.Fatalf("the room is not linked after the resync: %+v", p)
+	}
+	if !bot.spaceChildren("!space:example.com")["!child:example.com"] {
+		t.Error("the room is not listed in the space")
+	}
+	sent := bot.spaceStateCount()
+	if sent == 0 {
+		t.Fatal("no link events were sent")
+	}
+
+	resync(t, br, login, room)
+	if got := bot.spaceStateCount(); got != sent {
+		t.Errorf("a linked room got %d more space events", got-sent)
+	}
+}

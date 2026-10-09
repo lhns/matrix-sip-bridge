@@ -141,7 +141,7 @@ func (sc *SIPClient) GetCapabilities(_ context.Context, portal *bridgev2.Portal)
 	// A line's space holds rooms and carries no messages of its own.
 	// HandleMatrixMessage refuses one regardless; this is what a client is
 	// told beforehand.
-	if phonenum.IsSpaceID(string(portal.ID)) {
+	if kind, _ := phonenum.KindOf(string(portal.ID)); kind == phonenum.KindSpace {
 		return &event.RoomFeatures{}
 	}
 	return &event.RoomFeatures{
@@ -155,10 +155,10 @@ func (sc *SIPClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (*b
 	// Not behind line_spaces: a portal that is already a space stays one, and
 	// describing it as a DM only earns bridgev2's "Tried to change existing
 	// room type" and a DM room left acting as a parent.
-	if line := phonenum.LineFromSpaceID(string(portal.ID)); line != "" {
+	switch kind, line := phonenum.KindOf(string(portal.ID)); kind {
+	case phonenum.KindSpace:
 		return keepUserName(portal, spaceChatInfo(line)), nil
-	}
-	if line := phonenum.LineFromDialID(string(portal.ID)); line != "" {
+	case phonenum.KindDial:
 		return keepUserName(portal, sc.withLineParent(portal, dialChatInfo(line))), nil
 	}
 	info := &bridgev2.ChatInfo{
@@ -282,10 +282,10 @@ func (sc *SIPClient) resyncPortalName(portal *bridgev2.Portal) {
 // bridgeRoomName is the name the bridge gives a portal: the line for a line's
 // space, the number for everything else.
 func bridgeRoomName(portalID string) string {
-	if line := phonenum.LineFromSpaceID(portalID); line != "" {
+	switch kind, line := phonenum.KindOf(portalID); kind {
+	case phonenum.KindSpace:
 		return line
-	}
-	if line := phonenum.LineFromDialID(portalID); line != "" {
+	case phonenum.KindDial:
 		return dialRoomName(line)
 	}
 	return portalName(portalID)
@@ -367,11 +367,11 @@ func (sc *SIPClient) ResolveIdentifier(ctx context.Context, identifier string, _
 func (sc *SIPClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
 	// A line's space is room organisation: its ID has no number half, so
 	// NumberFromID would address the text to "+<line>-space".
-	if phonenum.IsSpaceID(string(msg.Portal.ID)) {
+	switch kind, line := phonenum.KindOf(string(msg.Portal.ID)); kind {
+	case phonenum.KindSpace:
 		return nil, fmt.Errorf("a line's space carries no messages")
-	}
-	// A dial room's messages are numbers to open a room for, never texts.
-	if line := phonenum.LineFromDialID(string(msg.Portal.ID)); line != "" {
+	case phonenum.KindDial:
+		// A dial room's messages are numbers to open a room for, never texts.
 		return sc.handleDialRoomMessage(ctx, msg, line)
 	}
 	if !sc.conn.Config.Messages.Enabled {
