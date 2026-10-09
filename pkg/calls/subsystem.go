@@ -331,13 +331,13 @@ func (s *Subsystem) HandleInboundCall(ctx context.Context, leg InboundLeg) {
 		return
 	}
 	// The conference header is the only thing that names the portal, and it
-	// comes off the wire: a header naming a line's space would put a call in
-	// the room that organises that line's rooms.
-	if phonenum.IsSpaceID(portalID) {
+	// comes off the wire: a header naming a line's space or dial room would
+	// put a call in a room that is not a conversation.
+	if phonenum.IsLineRoomID(portalID) {
 		s.log.Warn().
 			Str("conference", conference).
 			Str("from", leg.From()).
-			Msg("INVITE naming a line's space rather than a number, declining")
+			Msg("INVITE naming a line's space or dial room rather than a number, declining")
 		_ = leg.Reject(404, "Not Found")
 		return
 	}
@@ -1228,10 +1228,11 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal, caller id.UserID, o
 		return nil, fmt.Errorf("call bridging is disabled")
 	}
 	portalID := portal.ID
-	// A line's space has no number half to dial. This covers both callers:
-	// the !dial command and an RTC membership appearing in the room.
-	if phonenum.IsSpaceID(portalID) {
-		return nil, fmt.Errorf("portal %s is a line's space, not a number", portalID)
+	// A line's space or dial room has no number half to dial. This covers
+	// both callers: the !dial command and an RTC membership appearing in the
+	// room.
+	if phonenum.IsLineRoomID(portalID) {
+		return nil, fmt.Errorf("portal %s is a line's room, not a number", portalID)
 	}
 	if portal.MXID == "" {
 		return nil, fmt.Errorf("portal %s has no Matrix room", portalID)
@@ -1417,9 +1418,9 @@ func (s *Subsystem) dialPortalID(ctx context.Context, number, line string, calle
 func portalIDForNumber(e164 string, existing []string) (string, error) {
 	var onLines []string
 	for _, portalID := range existing {
-		// The portal list includes the per-line spaces, which are rooms and
-		// not conversations.
-		if phonenum.IsSpaceID(portalID) {
+		// The portal list includes the per-line spaces and dial rooms, which
+		// are not conversations.
+		if phonenum.IsLineRoomID(portalID) {
 			continue
 		}
 		if phonenum.NumberFromID(portalID) == e164 && phonenum.LineFromID(portalID) != "" {

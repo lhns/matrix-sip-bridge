@@ -175,3 +175,34 @@ func LineFromSpaceID(id string) string {
 func IsSpaceID(id string) bool {
 	return LineFromSpaceID(id) != ""
 }
+
+// dialIDSuffix marks a portal ID as a line's dial room: the room a user types
+// a number into to open its portal room on that line. Like spaceIDSuffix it
+// ends in a letter, so it can never be read as a number, and the two suffixes
+// differ, so a space ID is never a dial ID or the reverse.
+const dialIDSuffix = "-dial"
+
+// DialIDFor is the portal ID of a line's dial room.
+func DialIDFor(line string) (string, error) {
+	if !lineName.MatchString(line) {
+		return "", fmt.Errorf("%w: %q", ErrBadLine, line)
+	}
+	return line + dialIDSuffix, nil
+}
+
+// LineFromDialID is the line a dial room portal ID names, empty for an ID
+// that is not one.
+func LineFromDialID(id string) string {
+	line, ok := strings.CutSuffix(id, dialIDSuffix)
+	if !ok || !lineName.MatchString(line) {
+		return ""
+	}
+	return line
+}
+
+// IsLineRoomID reports whether a portal ID names a room that belongs to a line
+// rather than to a number: its space or its dial room. Neither may ever be
+// dialled, texted, or turned into a number.
+func IsLineRoomID(id string) bool {
+	return IsSpaceID(id) || LineFromDialID(id) != ""
+}
