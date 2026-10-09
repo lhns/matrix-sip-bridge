@@ -712,6 +712,17 @@ sipgo user agent over a loopback TCP listener, because the mistakes that matter
 there — a bodyless 200, an SDP that reads as hold, a MESSAGE that is not routed
 — are all wire-level. Nothing talks to a live Asterisk, LiveKit or homeserver.
 
+## Releasing
+
+1. In [CHANGELOG.md](CHANGELOG.md), move the `Unreleased` entries into a new
+   `## [X.Y.Z] - date` section and add its link reference at the bottom. Write
+   for people who run or use the bridge: config keys, behavior changes, and a
+   bold **Upgrading:** line for anything they must do.
+2. Merge, then tag the merge commit `vX.Y.Z` and push the tag. CI builds the
+   image from the tag.
+3. Publish the release with that section as its notes:
+   `gh release create vX.Y.Z --title vX.Y.Z --notes-file <the section body>`.
+
 ## Design decisions
 
 See [docs/adr](docs/adr/README.md) for the numbered index. The ones worth
