@@ -54,7 +54,7 @@ func (r *loginResolver) Login(ctx context.Context, recipient string) (*bridgev2.
 		recipient = string(def)
 	}
 	mxid := id.UserID(recipient)
-	if localpart, homeserver, err := mxid.Parse(); err != nil || localpart == "" || homeserver == "" {
+	if !isUserID(mxid) {
 		return nil, fmt.Errorf("%w: %q is not a Matrix user ID", calls.ErrUnknownRecipient, recipient)
 	}
 	login, created, err := r.ensure(ctx, mxid, true)
@@ -67,6 +67,12 @@ func (r *loginResolver) Login(ctx context.Context, recipient string) (*bridgev2.
 		login.Client.Connect(login.Log.WithContext(context.WithoutCancel(ctx)))
 	}
 	return login, nil
+}
+
+// isUserID reports whether mxid is a full Matrix user ID, with both halves.
+func isUserID(mxid id.UserID) bool {
+	localpart, homeserver, err := mxid.Parse()
+	return err == nil && localpart != "" && homeserver != ""
 }
 
 // ensure returns mxid's login, creating it if there is none. checkPermission

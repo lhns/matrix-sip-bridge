@@ -117,7 +117,7 @@ func (sc *SIPConnector) ensureLineMemberLogins(ctx context.Context) {
 			mlog.Warn().Err(err).Msg("Skipping a line member: the line name is not usable")
 			continue
 		}
-		if localpart, homeserver, err := mxid.Parse(); err != nil || localpart == "" || homeserver == "" {
+		if !isUserID(mxid) {
 			mlog.Warn().Msg("Skipping a line member that is not a Matrix user ID")
 			continue
 		}
@@ -162,25 +162,16 @@ func (sc *SIPClient) ensureLineRooms(ctx context.Context) {
 }
 
 func (sc *SIPClient) ensureLineRoom(ctx context.Context, line string) error {
-	login := sc.UserLogin
-	br := login.Bridge
 	if sc.conn.Config.LineSpaces {
 		spaceID, err := phonenum.SpaceIDFor(line)
 		if err != nil {
 			return err
 		}
-		space, err := br.GetPortalByKey(ctx, networkid.PortalKey{ID: networkid.PortalID(spaceID), Receiver: login.ID})
+		space, err := sc.ensureRoom(ctx, spaceID)
 		if err != nil {
-			return fmt.Errorf("get the space: %w", err)
+			return fmt.Errorf("the space: %w", err)
 		}
-		if space.MXID == "" {
-			if err := space.CreateMatrixRoom(ctx, login, nil); err != nil {
-				return fmt.Errorf("create the space: %w", err)
-			}
-			// A room with no member list only joins a double puppet.
-			login.MarkInPortal(ctx, space)
-		}
-		if err := ensureInPersonalSpace(ctx, login, space, false); err != nil {
+		if err := ensureInPersonalSpace(ctx, sc.UserLogin, space, false); err != nil {
 			return fmt.Errorf("list the space in the personal space: %w", err)
 		}
 	}
@@ -188,15 +179,26 @@ func (sc *SIPClient) ensureLineRoom(ctx context.Context, line string) error {
 	if err != nil {
 		return err
 	}
-	dial, err := br.GetPortalByKey(ctx, networkid.PortalKey{ID: networkid.PortalID(dialID), Receiver: login.ID})
-	if err != nil {
-		return fmt.Errorf("get the dial room: %w", err)
-	}
-	if dial.MXID == "" {
-		if err := dial.CreateMatrixRoom(ctx, login, nil); err != nil {
-			return fmt.Errorf("create the dial room: %w", err)
-		}
-		login.MarkInPortal(ctx, dial)
+	if _, err := sc.ensureRoom(ctx, dialID); err != nil {
+		return fmt.Errorf("the dial room: %w", err)
 	}
 	return nil
+}
+
+// ensureRoom returns this login's portal for a line room, creating its Matrix
+// room if it has none.
+func (sc *SIPClient) ensureRoom(ctx context.Context, portalID string) (*bridgev2.Portal, error) {
+	login := sc.UserLogin
+	portal, err := login.Bridge.GetPortalByKey(ctx, networkid.PortalKey{ID: networkid.PortalID(portalID), Receiver: login.ID})
+	if err != nil {
+		return nil, fmt.Errorf("get portal: %w", err)
+	}
+	if portal.MXID == "" {
+		if err := portal.CreateMatrixRoom(ctx, login, nil); err != nil {
+			return nil, fmt.Errorf("create room: %w", err)
+		}
+		// A room with no member list only joins a double puppet.
+		login.MarkInPortal(ctx, portal)
+	}
+	return portal, nil
 }

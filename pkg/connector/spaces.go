@@ -161,12 +161,12 @@ func (sc *SIPConnector) repairLineSpaces(ctx context.Context) error {
 	br := sc.br
 	log := br.Log.With().Str("action", "repair line spaces").Logger()
 	ctx = log.WithContext(ctx)
-	portals, err := br.DB.Portal.GetAllWithoutReceiver(ctx)
+	portals, err := portalsWithoutReceiver(ctx, br)
 	if err != nil {
-		return fmt.Errorf("list portals without a receiver: %w", err)
+		return err
 	}
 	for _, src := range portals {
-		if src.Receiver != "" || !isSpacePortal(src) {
+		if !isSpacePortal(src) {
 			continue
 		}
 		children, err := br.DB.Portal.GetChildren(ctx, src.PortalKey)
