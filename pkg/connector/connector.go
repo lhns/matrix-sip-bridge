@@ -5,14 +5,12 @@ package connector
 import (
 	"context"
 	"fmt"
-	"slices"
 	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/matrix"
-	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
@@ -27,12 +25,16 @@ import (
 type SIPConnector struct {
 	Config Config
 
-	br      *bridgev2.Bridge
-	sip     *siptransport.Transport
-	calls   *calls.Subsystem
-	db      *sipdb.Database
-	health  *callHealth
-	metrics *metrics.Recorder
+	br     *bridgev2.Bridge
+	sip    *siptransport.Transport
+	calls  *calls.Subsystem
+	db     *sipdb.Database
+	logins *loginResolver
+	// queueEvent is br.QueueRemoteEvent; tests replace it to see what would
+	// reach a portal without running one.
+	queueEvent func(*bridgev2.UserLogin, bridgev2.RemoteEvent)
+	health     *callHealth
+	metrics    *metrics.Recorder
 
 	// cancel stops the SIP endpoint and the call subsystem loops.
 	cancel context.CancelFunc
@@ -51,6 +53,7 @@ var (
 func (sc *SIPConnector) Init(bridge *bridgev2.Bridge) {
 	sc.br = bridge
 	sc.Config.applyDefaults()
+	sc.logins = &loginResolver{br: bridge}
 	sc.health = newCallHealth(sc.Config.Calls.Notices)
 	// The logger labels this schema's upgrade, not its queries; see sipdb.New.
 	sc.db = sipdb.New(bridge.DB.Database, bridge.Log.With().Str("db_section", "sip").Logger())
@@ -71,7 +74,11 @@ func (sc *SIPConnector) Start(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	sc.cancel = cancel
 
-	sc.warnAboutRelay()
+	// Before the SIP endpoint: see migrateSharedLogin.
+	if err := sc.migrateSharedLogin(ctx); err != nil {
+		cancel()
+		return fmt.Errorf("migrate the shared login: %w", err)
+	}
 
 	sip, err := siptransport.New(sc.Config.SIP, sc.br.Log.With().Str("component", "sip").Logger(), sc.metrics)
 	if err != nil {
@@ -80,7 +87,7 @@ func (sc *SIPConnector) Start(ctx context.Context) error {
 	}
 	sc.sip = sip
 	sc.calls = calls.New(
-		sc.Config.Calls, sc.br, legacyLogins{sc.br},
+		sc.Config.Calls, sc.br, sc.logins,
 		sipTelephony{sip, sc.Config.SIP.ConferenceHeader, sc.Config.SIP.CallerHeader}, sc.db,
 		sc.br.Log.With().Str("component", "calls").Logger(), sc.metrics,
 	)
@@ -140,9 +147,9 @@ func (sc *SIPConnector) watchSIPHealth(ctx context.Context) {
 	}
 }
 
-// report sends a bridge state that actually changed.
+// report sends a bridge state that actually changed, to every login.
 //
-// The login is looked up each time rather than held: the SIP endpoint and the
+// The logins are looked up each time rather than held: the SIP endpoint and the
 // trunk are reconciled before anyone has logged in, and there is nobody to
 // tell until they have. A state dropped for that reason is still recorded as
 // the last one sent, so it is never re-sent as a change -- which is safe only
@@ -151,11 +158,9 @@ func (sc *SIPConnector) report(state status.BridgeState, changed bool) {
 	if !changed {
 		return
 	}
-	login := sc.br.GetCachedUserLoginByID(networkid.UserLoginID(LoginID))
-	if login == nil {
-		return
+	for _, login := range sc.br.GetAllCachedUserLogins() {
+		login.BridgeState.Send(state)
 	}
-	login.BridgeState.Send(state)
 }
 
 // sipReady reports whether the SIP endpoint is usable, for the bridge state.
@@ -180,25 +185,6 @@ func (s sipTelephony) Invite(ctx context.Context, to, conference string, caller 
 		headers[s.callerHeader] = caller.String()
 	}
 	return s.transport.Invite(ctx, to, headers)
-}
-
-// warnAboutRelay checks the two settings without which the bridge appears to
-// work but silently drops every Matrix message from anyone but the one user who
-// happens to own the login.
-//
-// There is no per-user SIP account to log into, so all Matrix users share the
-// single "sip" login and reach it through relay mode.
-func (sc *SIPConnector) warnAboutRelay() {
-	relay := sc.br.Config.Relay
-	if !relay.Enabled {
-		sc.br.Log.Warn().Msg("bridge.relay.enabled is false; only the user who logged in can send messages")
-		return
-	}
-	if !slices.Contains(relay.DefaultRelays, LoginID) {
-		sc.br.Log.Warn().
-			Str("expected", LoginID).
-			Msg("bridge.relay.default_relays does not list the shared login; portals will not relay")
-	}
 }
 
 // Stop shuts the loops down.
@@ -283,10 +269,11 @@ func (sc *SIPConnector) GetDBMetaTypes() database.MetaTypes {
 	}
 }
 
-// LoadUserLogin attaches the client to the one static login.
+// LoadUserLogin attaches the client to a user's login, or to the old shared
+// one the migration still has to read.
 func (sc *SIPConnector) LoadUserLogin(_ context.Context, login *bridgev2.UserLogin) error {
-	if login.ID != LoginID {
-		return fmt.Errorf("unexpected login ID %q, expected %q", login.ID, LoginID)
+	if login.ID != loginIDFor(login.UserMXID) && login.ID != legacyLoginID {
+		return fmt.Errorf("unexpected login ID %q for %s", login.ID, login.UserMXID)
 	}
 	login.Client = &SIPClient{
 		UserLogin: login,
@@ -295,11 +282,11 @@ func (sc *SIPConnector) LoadUserLogin(_ context.Context, login *bridgev2.UserLog
 	return nil
 }
 
-// GetLoginFlows offers the single flow that just claims the shared login.
+// GetLoginFlows offers the single flow that just claims the user's own login.
 func (sc *SIPConnector) GetLoginFlows() []bridgev2.LoginFlow {
 	return []bridgev2.LoginFlow{{
 		Name:        "SIP",
-		Description: "Use the bridge's shared SIP endpoint",
+		Description: "Use the bridge's SIP endpoint",
 		ID:          LoginFlowID,
 	}}
 }
@@ -307,8 +294,9 @@ func (sc *SIPConnector) GetLoginFlows() []bridgev2.LoginFlow {
 // CreateLogin returns a login process that completes immediately.
 //
 // There is nothing to log in to: the SIP identity is in the bridge config, not
-// per user. The login exists only because bridgev2 requires a UserLogin to own
-// portals and to be a relay target.
+// per user. The login exists because bridgev2 requires a UserLogin to own
+// portals. Texts and calls create it on their own the first time they name
+// the user; this is only the manual route.
 func (sc *SIPConnector) CreateLogin(_ context.Context, user *bridgev2.User, flowID string) (bridgev2.LoginProcess, error) {
 	if flowID != LoginFlowID {
 		return nil, fmt.Errorf("unknown login flow ID %q", flowID)
@@ -323,25 +311,20 @@ type SIPLogin struct {
 
 var _ bridgev2.LoginProcess = (*SIPLogin)(nil)
 
-// Start finishes the login in one step with a fixed ID, so that every Matrix
-// user ends up on the same UserLogin and the same portals.
+// Start finishes the login in one step, with the ID inbound traffic would
+// have created.
 func (sl *SIPLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
 	ul, err := sl.User.NewLogin(ctx, &database.UserLogin{
-		ID:         networkid.UserLoginID(LoginID),
+		ID:         loginIDFor(sl.User.MXID),
 		RemoteName: "SIP",
-	}, &bridgev2.NewLoginParams{
-		// A second Matrix user logging in must adopt the existing login rather
-		// than create a duplicate, or bridgev2 would try to run two clients
-		// over one SIP endpoint.
-		DeleteOnConflict: false,
-	})
+	}, &bridgev2.NewLoginParams{DeleteOnConflict: false})
 	if err != nil {
 		return nil, err
 	}
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeComplete,
 		StepID:       "de.lhns.sip.complete",
-		Instructions: "Connected to the shared SIP endpoint",
+		Instructions: "Connected to the bridge's SIP endpoint",
 		CompleteParams: &bridgev2.LoginCompleteParams{
 			UserLoginID: ul.ID,
 			UserLogin:   ul,
@@ -350,15 +333,3 @@ func (sl *SIPLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
 }
 
 func (sl *SIPLogin) Cancel() {}
-
-// legacyLogins is a placeholder for the per-user login resolver: it answers
-// every recipient with the shared login.
-type legacyLogins struct{ br *bridgev2.Bridge }
-
-func (l legacyLogins) Login(_ context.Context, _ string) (*bridgev2.UserLogin, error) {
-	login := l.br.GetCachedUserLoginByID(networkid.UserLoginID(LoginID))
-	if login == nil {
-		return nil, calls.ErrUnknownRecipient
-	}
-	return login, nil
-}

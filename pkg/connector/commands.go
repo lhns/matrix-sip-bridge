@@ -27,7 +27,9 @@ func (sc *SIPConnector) dialCommand() *commands.FullHandler {
 			Description: "Call a phone number, creating its portal room if needed",
 			Args:        "<_phone number_> [_line_]",
 		},
-		RequiresLogin: true,
+		// Not RequiresLogin: a permitted user gets their login on first use,
+		// as they would from a text, and a refused one is told so below.
+		RequiresLogin: false,
 		Func: func(ce *commands.Event) {
 			if strings.TrimSpace(ce.RawArgs) == "" {
 				ce.Reply("Usage: `$cmdprefix dial <phone number> [line]`, the number in international " +
@@ -36,6 +38,13 @@ func (sc *SIPConnector) dialCommand() *commands.FullHandler {
 				return
 			}
 			number, line := splitDialArgs(ce.RawArgs)
+			if _, err := sc.logins.Login(ce.Ctx, string(ce.User.MXID)); errors.Is(err, calls.ErrRecipientRefused) {
+				ce.Reply("You are not permitted to use this bridge.")
+				return
+			} else if err != nil {
+				ce.Reply("Failed to set up your login: %v", err)
+				return
+			}
 			call, err := sc.calls.DialNumber(ce.Ctx, number, line, ce.User.MXID)
 			var ambiguous *calls.AmbiguousNumberError
 			switch {
