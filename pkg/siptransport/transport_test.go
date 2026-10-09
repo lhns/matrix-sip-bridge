@@ -436,6 +436,59 @@ func TestInboundMessageIsDeliveredAndAcknowledged(t *testing.T) {
 	}
 }
 
+// The header names who the text is for; the SIP server sends one MESSAGE per
+// recipient. Whitespace around the value is not part of it.
+func TestInboundMessageCarriesItsRecipient(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	got := make(chan InboundMessage, 2)
+	tr, bridgeAddr := startBridge(t, ctx, nil)
+	tr.OnMessage(func(ctx context.Context, msg InboundMessage) error {
+		got <- msg
+		return nil
+	})
+
+	peer := newFakePeer(t, ctx)
+	peer.sendMessageWith(t, ctx, bridgeAddr, "text/plain", "hi",
+		map[string]string{"X-Matrix-Recipient": "  @alice:example.com "})
+	if msg := <-got; msg.Recipient != "@alice:example.com" {
+		t.Errorf("Recipient = %q, want the trimmed header value", msg.Recipient)
+	}
+	peer.sendMessage(t, ctx, bridgeAddr, "text/plain", "hi")
+	if msg := <-got; msg.Recipient != "" {
+		t.Errorf("Recipient = %q, want empty without the header", msg.Recipient)
+	}
+}
+
+// A handler that refuses a text for a reason the SIP server should act on
+// says so with a status; anything else stays 500.
+func TestInboundMessageRejectionUsesTheHandlersStatus(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	tr, bridgeAddr := startBridge(t, ctx, nil)
+	var fail error
+	tr.OnMessage(func(context.Context, InboundMessage) error { return fail })
+	peer := newFakePeer(t, ctx)
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"reject error", &RejectError{Code: 403, Reason: "Forbidden", Err: errors.New("not permitted")}, 403},
+		{"wrapped reject error", fmt.Errorf("deliver: %w", &RejectError{Code: 404, Reason: "Not Found"}), 404},
+		{"a code that is not a failure", &RejectError{Code: 200, Reason: "OK"}, 500},
+		{"plain error", errors.New("boom"), 500},
+	} {
+		fail = tc.err
+		if res := peer.sendMessage(t, ctx, bridgeAddr, "text/plain", "hi"); res.StatusCode != tc.want {
+			t.Errorf("%s: response = %d, want %d", tc.name, res.StatusCode, tc.want)
+		}
+	}
+}
+
 // chan_sip's ast_msg_tech only handles text/plain, and answers anything else
 // 415. The bridge does the same rather than bridging a body the far end could
 // not have produced.
@@ -556,10 +609,19 @@ func TestOutboundMessageRefusesOversizedBodies(t *testing.T) {
 
 func (p *fakePeer) sendMessage(t *testing.T, ctx context.Context, bridgeAddr, contentType, body string) *sip.Response {
 	t.Helper()
+	return p.sendMessageWith(t, ctx, bridgeAddr, contentType, body, nil)
+}
+
+// sendMessageWith is sendMessage with extra headers, name to value.
+func (p *fakePeer) sendMessageWith(t *testing.T, ctx context.Context, bridgeAddr, contentType, body string, headers map[string]string) *sip.Response {
+	t.Helper()
 	host, port, _ := splitHostPort(bridgeAddr)
 	req := sip.NewRequest(sip.MESSAGE, sip.Uri{Scheme: "sip", User: "matrix-sip-bridge", Host: host, Port: port})
 	req.AppendHeader(sip.NewHeader("Content-Type", contentType))
 	req.AppendHeader(sip.NewHeader("From", "<sip:15551234567@pbx.example.com>;tag=peertag"))
+	for name, value := range headers {
+		req.AppendHeader(sip.NewHeader(name, value))
+	}
 	req.SetBody([]byte(body))
 	req.SetTransport("TCP")
 	req.SetDestination(bridgeAddr)

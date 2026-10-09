@@ -36,7 +36,8 @@ const maxPacketSize = 20480
 const messageHandlerTimeout = 32 * time.Second
 
 // MessageHandler is called for each inbound SIP MESSAGE that passed the
-// content-type check. Returning an error makes the bridge reply 500.
+// content-type check. Returning an error makes the bridge reply 500, or the
+// status of a RejectError in its chain.
 type MessageHandler func(ctx context.Context, msg InboundMessage) error
 
 // InviteHandler is called for each inbound INVITE. It owns the leg: it must
@@ -49,7 +50,27 @@ type InboundMessage struct {
 	From string
 	To   string
 	Body string
+	// Recipient is the value of the configured recipient header, the Matrix
+	// user the message is for. Empty when the header is absent.
+	Recipient string
 }
+
+// RejectError makes a handler's refusal reach the far end as a specific SIP
+// status instead of 500.
+type RejectError struct {
+	Code   int
+	Reason string
+	Err    error
+}
+
+func (e *RejectError) Error() string {
+	if e.Err == nil {
+		return fmt.Sprintf("rejected with %d %s", e.Code, e.Reason)
+	}
+	return fmt.Sprintf("rejected with %d %s: %v", e.Code, e.Reason, e.Err)
+}
+
+func (e *RejectError) Unwrap() error { return e.Err }
 
 // Transport is the bridge's SIP user agent.
 type Transport struct {
