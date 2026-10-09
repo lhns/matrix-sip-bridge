@@ -616,12 +616,11 @@ func (s *Subsystem) answerInbound(ctx context.Context, call *database.Call, leg 
 		_ = s.failCall(ctx, call, mediaFailureReason(err))
 		return answerOver
 	}
-	// The client joined before the LiveKit participant existed; see the second
-	// publishGhostMembership in dial.
+	// The client joined before the LiveKit participant existed.
 	if intent, err := s.mx.GhostIntent(ctx, call.PortalID); err != nil {
 		log.Warn().Err(err).Msg("Could not re-publish the RTC membership; the Matrix side may hear nothing")
-	} else if _, err := s.publishGhostMembership(ctx, intent, call); err != nil {
-		log.Warn().Err(err).Msg("Could not re-publish the RTC membership; the Matrix side may hear nothing")
+	} else {
+		s.republishGhostMembership(ctx, intent, call)
 	}
 	if err := leg.Answer(); err != nil {
 		log.Err(err).Msg("Failed to answer the call")
@@ -1328,23 +1327,29 @@ func (s *Subsystem) dial(ctx context.Context, portal Portal, caller id.UserID, o
 		_ = s.failCall(ctx, call, mediaFailureReason(err))
 		return nil, err
 	}
-	// Again, now that the participant it names is in the LiveKit room.
-	//
-	// A client resolves which identities to subscribe to when it joins and
-	// when the membership state changes; a participant turning up later is
-	// neither. Outbound has to publish before dialling -- it is what the
-	// Matrix side joins -- so without this second event the call carries
-	// Matrix audio to the phone and none back. Same state key, so the
-	// retraction still clears exactly one. Not fatal: one-way beats dropped.
-	if _, err := s.publishGhostMembership(ctx, intent, call); err != nil {
-		s.log.Warn().Err(err).Str("call_id", call.CallID).
-			Msg("Could not re-publish the RTC membership; the Matrix side may hear nothing")
-	}
+	// Outbound has to publish before dialling -- it is what the Matrix side
+	// joins -- so the participant only exists now.
+	s.republishGhostMembership(ctx, intent, call)
 	s.log.Info().
 		Str("call_id", call.CallID).
 		Str("portal_id", portalID).
 		Msg("Outbound call placed")
 	return call, nil
+}
+
+// republishGhostMembership publishes the ghost's RTC membership again, once
+// the participant it names is in the LiveKit room.
+//
+// A client resolves which identities to subscribe to when it joins and when
+// the membership state changes; a participant turning up later is neither, so
+// without this second event the call carries Matrix audio to the phone and
+// none back. Same state key, so the retraction still clears exactly one. Not
+// fatal: one-way beats dropped.
+func (s *Subsystem) republishGhostMembership(ctx context.Context, intent GhostIntent, call *database.Call) {
+	if _, err := s.publishGhostMembership(ctx, intent, call); err != nil {
+		s.log.Warn().Err(err).Str("call_id", call.CallID).
+			Msg("Could not re-publish the RTC membership; the Matrix side may hear nothing")
+	}
 }
 
 // AmbiguousNumberError is returned for a number dialled with no line that
@@ -1361,6 +1366,12 @@ func (e *AmbiguousNumberError) Error() string {
 		e.Number, strings.Join(e.Lines, ", "))
 }
 
+// PortalRoom returns owner's room for a portal, creating it and putting owner
+// in it as a call would.
+func (s *Subsystem) PortalRoom(ctx context.Context, portalID string, owner id.UserID) (Portal, error) {
+	return s.mx.PortalRoom(ctx, portalID, owner)
+}
+
 // DialNumber resolves a number to its portal and calls it, on behalf of the
 // Matrix user who asked.
 //
@@ -1370,12 +1381,6 @@ func (e *AmbiguousNumberError) Error() string {
 // portal ID is an error here and an unroutable one is the SIP server's to
 // refuse. Silently dropping it would put the call in a different portal from
 // the one that line's inbound calls land in.
-// PortalRoom returns owner's room for a portal, creating it and putting owner
-// in it as a call would.
-func (s *Subsystem) PortalRoom(ctx context.Context, portalID string, owner id.UserID) (Portal, error) {
-	return s.mx.PortalRoom(ctx, portalID, owner)
-}
-
 func (s *Subsystem) DialNumber(ctx context.Context, number, line string, caller id.UserID) (*database.Call, error) {
 	portalID, err := s.dialPortalID(ctx, number, line, caller)
 	if err != nil {
