@@ -139,17 +139,19 @@ func (sc *SIPConnector) reIDPortal(ctx context.Context, src *database.Portal, re
 }
 
 // transferSpace gives the old login's personal filtering space to the new
-// login. UserLogin.Delete deletes that space unconditionally, and it is the
-// owner's.
+// login, or, if that has one already, just detaches it: UserLogin.Delete
+// deletes the login's space room unconditionally, and it is the owner's.
 func transferSpace(ctx context.Context, from, to *bridgev2.UserLogin) error {
-	if from.SpaceRoom == "" || to.SpaceRoom != "" {
+	if from.SpaceRoom == "" {
 		return nil
 	}
-	to.SpaceRoom = from.SpaceRoom
-	from.SpaceRoom = ""
-	if err := to.Save(ctx); err != nil {
-		return fmt.Errorf("save the space on the new login: %w", err)
+	if to.SpaceRoom == "" {
+		to.SpaceRoom = from.SpaceRoom
+		if err := to.Save(ctx); err != nil {
+			return fmt.Errorf("save the space on the new login: %w", err)
+		}
 	}
+	from.SpaceRoom = ""
 	if err := from.Save(ctx); err != nil {
 		return fmt.Errorf("clear the space on the shared login: %w", err)
 	}

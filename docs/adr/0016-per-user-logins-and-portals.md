@@ -37,7 +37,7 @@ already rings per person, so the bridge can be per person too.
   same conference. The bridge answers at most one leg per conference, so first
   answer wins is decided here and not left to the SIP server. Inbound media is
   set up after the Matrix answer and before the SIP 200, so a leg that loses
-  never puts livekit-sip into the conference. The winner's room records
+  never puts livekit-sip into the conference. The other recipients' rooms record
   `Answered by <name>`.
 - A text sent on a line carries the line as the host of its `From` URI, as
   inbound ones do.

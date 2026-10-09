@@ -111,18 +111,18 @@ func TestAnsweredElsewhere(t *testing.T) {
 	if err != nil || got == nil || got.RoomID != "!a:example.com" || got.MatrixUser != "@alice:example.com" {
 		t.Fatalf("with a bridged = %+v, %v, want alice's row", got, err)
 	}
-	// An answered leg that has since ended still won.
-	if _, err := db.Call.End(ctx, a); err != nil {
-		t.Fatalf("End: %v", err)
-	}
-	if got, err := db.Call.AnsweredElsewhere(ctx, b, window); err != nil || got == nil {
-		t.Errorf("with a ended = %+v, %v, want alice's row", got, err)
-	}
 	if got, err := db.Call.AnsweredElsewhere(ctx, a, window); err != nil || got != nil {
 		t.Errorf("a's own answer = %+v, %v, want none", got, err)
 	}
 	if got, err := db.Call.AnsweredElsewhere(ctx, other, window); err != nil || got != nil {
 		t.Errorf("another conference = %+v, %v, want none", got, err)
+	}
+	// An ended winner no longer counts: one whose media failed sent no 200.
+	if _, err := db.Call.End(ctx, a); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if got, err := db.Call.AnsweredElsewhere(ctx, b, window); err != nil || got != nil {
+		t.Errorf("with a ended = %+v, %v, want none", got, err)
 	}
 
 	// An answer from long before this leg started is a previous call.

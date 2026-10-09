@@ -141,7 +141,7 @@ const (
 		SELECT ` + callColumns + `
 		FROM sip_call
 		WHERE conference = $1 AND call_id <> $2 AND direction = 'inbound'
-		  AND matrix_user <> '' AND state IN ('bridged', 'ended') AND created_at >= $3
+		  AND matrix_user <> '' AND state = 'bridged' AND created_at >= $3
 		ORDER BY created_at DESC LIMIT 1
 	`
 	getCallByIDQuery = `
@@ -250,7 +250,8 @@ func (cq *CallQuery) GetActiveByConference(ctx context.Context, conference strin
 }
 
 // AnsweredElsewhere returns the other inbound leg of c's conference that a
-// Matrix user answered, or nil. The row may be bridged or already ended.
+// Matrix user answered, or nil. Only a bridged row counts: a winner whose
+// media failed ends without a 200, so the SIP server never cancelled for it.
 // within bounds how far before c an answered leg may have been created, so a
 // previous call to the same number is not mistaken for this one's winner.
 func (cq *CallQuery) AnsweredElsewhere(ctx context.Context, c *Call, within time.Duration) (*Call, error) {
