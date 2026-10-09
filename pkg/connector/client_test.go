@@ -201,19 +201,18 @@ func TestChatInfoIsADirectChat(t *testing.T) {
 	}
 }
 
-// The two ways an inbound text disappears, both of which are invisible from
-// the SIP side: the first because the bridge deliberately answers 200 to a
-// sender it cannot key a portal on, and the second because nothing is logged
-// anywhere the far end can read. The counters are the only trace either
-// leaves.
+// The ways an inbound text is not bridged that are invisible from the SIP
+// side: the first because the bridge deliberately answers 200 to a sender it
+// cannot key a portal on, the second because the recipient is refused and the
+// far end only sees a status. The counters are the only trace either leaves.
 func TestInboundMessageDropsAreCounted(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		in      siptransport.InboundMessage
 		outcome string
-		// wantErr is what the transport turns into a status: nil is answered
-		// 200, an error 500.
-		wantErr bool
+		// wantStatus is what the transport turns the error into: 0 is no
+		// error and a 200.
+		wantStatus int
 	}{
 		{
 			name:    "unparseable sender",
@@ -221,26 +220,97 @@ func TestInboundMessageDropsAreCounted(t *testing.T) {
 			outcome: metrics.MessageDroppedBadSender,
 		},
 		{
-			name:    "nobody logged in",
-			in:      siptransport.InboundMessage{From: "sip:+15551234567@example.com", To: "sip:15557654321@example.com", Body: "hi"},
-			outcome: metrics.MessageDroppedNoLogin,
-			wantErr: true,
+			name:       "no recipient and no default",
+			in:         siptransport.InboundMessage{From: "sip:+15551234567@example.com", To: "sip:15557654321@example.com", Body: "hi"},
+			outcome:    metrics.MessageRefusedRecipient,
+			wantStatus: 404,
+		},
+		{
+			name:       "recipient without login permission",
+			in:         siptransport.InboundMessage{From: "sip:+15551234567@example.com", Body: "hi", Recipient: "@mallory:example.com"},
+			outcome:    metrics.MessageRefusedRecipient,
+			wantStatus: 403,
+		},
+		{
+			name:       "recipient that is not an MXID",
+			in:         siptransport.InboundMessage{From: "sip:+15551234567@example.com", Body: "hi", Recipient: "alice"},
+			outcome:    metrics.MessageRefusedRecipient,
+			wantStatus: 404,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			_, sc := newTestBridge(t, ownerPermissions())
 			reg := prometheus.NewRegistry()
-			sc := &SIPConnector{
-				br:      &bridgev2.Bridge{Log: zerolog.Nop()},
-				metrics: metrics.New(reg),
-			}
+			sc.metrics = metrics.New(reg)
 			err := sc.handleInboundMessage(context.Background(), tc.in)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("handleInboundMessage error = %v, want error: %v", err, tc.wantErr)
+			var reject *siptransport.RejectError
+			switch {
+			case tc.wantStatus == 0 && err != nil:
+				t.Fatalf("handleInboundMessage error = %v, want none", err)
+			case tc.wantStatus != 0 && (!errors.As(err, &reject) || reject.Code != tc.wantStatus):
+				t.Fatalf("handleInboundMessage error = %v, want a %d rejection", err, tc.wantStatus)
 			}
 			if got := counter(t, reg, "sip_bridge_messages_total", metrics.DirectionInbound, tc.outcome); got != 1 {
 				t.Errorf("messages_total{inbound,%s} = %v, want 1", tc.outcome, got)
 			}
 		})
+	}
+}
+
+// Each person's text lands in their own room: the portal key's receiver is the
+// recipient's login, and an absent header means the default recipient.
+func TestInboundMessageIsDeliveredToTheRecipientsOwnPortal(t *testing.T) {
+	br, sc := newTestBridge(t, bridgeconfigWith(testOwner, "@bob:example.com"))
+	sc.metrics = metrics.New(prometheus.NewRegistry())
+	br.DB.KV.Set(context.Background(), keyDefaultRecipient, string(testOwner))
+	var got []*queuedEvent
+	sc.queueEvent = func(login *bridgev2.UserLogin, evt bridgev2.RemoteEvent) {
+		got = append(got, &queuedEvent{login: login.ID, key: evt.GetPortalKey()})
+	}
+	for _, recipient := range []string{"@bob:example.com", "@alice:example.com", ""} {
+		in := siptransport.InboundMessage{From: "sip:+15551234567@home", Body: "hi", Recipient: recipient}
+		if err := sc.handleInboundMessage(context.Background(), in); err != nil {
+			t.Fatalf("recipient %q: %v", recipient, err)
+		}
+	}
+	want := []networkid.UserLoginID{"@bob:example.com", "@alice:example.com", "@alice:example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("queued %d events, want %d", len(got), len(want))
+	}
+	for i, ev := range got {
+		if ev.login != want[i] || ev.key.Receiver != want[i] || ev.key.ID != "home-+15551234567" {
+			t.Errorf("event %d = login %s, key %+v; want both receiver and login %s", i, ev.login, ev.key, want[i])
+		}
+	}
+}
+
+type queuedEvent struct {
+	login networkid.UserLoginID
+	key   networkid.PortalKey
+}
+
+// A text goes out From the configured URI with the portal's line as the host,
+// mirroring what an inbound text carries; the sender stays in the display name.
+func TestOutboundFromCarriesTheLine(t *testing.T) {
+	const configured = "sip:+15551234567@example.com"
+	for _, tc := range []struct {
+		name, from, line, want string
+	}{
+		{"line replaces the host", configured, "home", "sip:+15551234567@home"},
+		{"hyphenated line", configured, "office-main", "sip:+15551234567@office-main"},
+		{"port is dropped", "sip:+15551234567@example.com:5060", "home", "sip:+15551234567@home"},
+		{"no line leaves it alone", configured, "", configured},
+		{"nothing configured", "", "home", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := outboundFrom(tc.from, tc.line)
+			if err != nil || got != tc.want {
+				t.Errorf("outboundFrom(%q, %q) = %q, %v; want %q", tc.from, tc.line, got, err, tc.want)
+			}
+		})
+	}
+	if _, err := outboundFrom("not a uri", "home"); err == nil {
+		t.Error("an unparsable outbound_from should be an error")
 	}
 }
 

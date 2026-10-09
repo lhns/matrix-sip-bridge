@@ -2,6 +2,7 @@ package siptransport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -45,7 +46,10 @@ func (t *Transport) handleMessage(req *sip.Request, tx sip.ServerTransaction) {
 		t.respond(req, tx, 415, "Unsupported Media Type")
 		return
 	}
-	msg := InboundMessage{Body: string(req.Body())}
+	msg := InboundMessage{
+		Body:      string(req.Body()),
+		Recipient: strings.TrimSpace(headerValue(req, t.cfg.RecipientHeader)),
+	}
 	if h := req.From(); h != nil {
 		msg.From = h.Address.String()
 	}
@@ -64,7 +68,12 @@ func (t *Transport) handleMessage(req *sip.Request, tx sip.ServerTransaction) {
 	// never lands in two buckets.
 	if err := (*h)(ctx, msg); err != nil {
 		t.log.Warn().Err(err).Msg("Rejecting inbound SIP MESSAGE")
-		t.respond(req, tx, 500, "Server Internal Error")
+		code, reason := 500, "Server Internal Error"
+		var reject *RejectError
+		if errors.As(err, &reject) && reject.Code >= 300 && reject.Code <= 699 {
+			code, reason = reject.Code, reject.Reason
+		}
+		t.respond(req, tx, code, reason)
 		return
 	}
 	t.respond(req, tx, 200, "OK")

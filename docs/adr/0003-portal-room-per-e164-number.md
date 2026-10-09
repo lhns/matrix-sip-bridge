@@ -3,7 +3,9 @@
 ## Status
 
 Amended by [ADR-0014](0014-a-portal-id-is-scoped-to-a-line.md), which scopes
-the ID to a line and has the number carry its own `+`.
+the ID to a line and has the number carry its own `+`. Amended by
+[ADR-0016](0016-per-user-logins-and-portals.md): the room is per Matrix user,
+not shared.
 
 ## Context
 

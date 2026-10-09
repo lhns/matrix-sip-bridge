@@ -4,6 +4,9 @@
 
 Accepted, amended by [ADR-0011](0011-ringing-is-a-notification-the-portal-must-permit.md)
 
+Amended by [ADR-0016](0016-per-user-logins-and-portals.md): inbound media is
+bridged after the Matrix answer, before the SIP 200.
+
 What makes a client ring is the MSC4075 notification, not the RTC membership
 this ADR publishes. The membership only makes the call joinable.
 
