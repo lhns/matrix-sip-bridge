@@ -11,7 +11,7 @@ Semantic Versioning.
 - A room whose line space, or link to it, failed to be created is now retried on its next resync instead of staying unlinked.
 
 ### Changed
-- At startup the bridge logs how many calls left open by a restart it ended.
+- At startup the bridge logs how many calls it closed that were left open by the previous run.
 - Otherwise internal cleanup; no other behavior change.
 
 ## [0.2.1] - 2026-10-09
@@ -26,7 +26,7 @@ Semantic Versioning.
 
 ## [0.2.0] - 2026-10-09
 ### Added
-- Every Matrix user has their own login and their own rooms. The bridge creates a user's login the first time a call or text names them, if `bridge.permissions` gives them `login`. See [ADR-0016](https://github.com/lhns/matrix-sip-bridge/blob/main/docs/adr/0016-per-user-logins-and-portals.md).
+- Every Matrix user has their own login and their own rooms. The bridge creates a user's login the first time a call or text names them, if `bridge.permissions` lets them log in (level `user` or higher). See [ADR-0016](https://github.com/lhns/matrix-sip-bridge/blob/main/docs/adr/0016-per-user-logins-and-portals.md).
 - `sip.recipient_header` (default `X-Matrix-Recipient`): the header on an inbound INVITE or MESSAGE that names the Matrix user it is for. A user without `login` permission is refused with 403, a value that is not an MXID with 404. With no header, the call or text goes to the default recipient, as before.
 - Calls ring each recipient in their own room: send one INVITE leg per recipient, all with the same `X-Conference`. The first to join wins and the bridge answers only that leg; the others see `Answered by <name>`. Declining rejects only that leg (486).
 - `network.line_spaces` (default `true`) switches the per-line Matrix spaces off for new rooms. It does not remove existing spaces.
