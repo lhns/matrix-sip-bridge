@@ -834,8 +834,7 @@ func TestLineSpacesOffNamesNoParent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetChatInfo(%q): %v", portalID, err)
 		}
-		// nil, not the empty ID: an empty one would pull the room out of the
-		// space it is already in.
+		// Neither bridgev2's parent nor the connector's own.
 		if info.ParentID != nil || info.ExtraUpdates != nil {
 			t.Errorf("%s named a parent with line_spaces off", portalID)
 		}

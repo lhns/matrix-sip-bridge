@@ -23,7 +23,7 @@ type Config struct {
 	// LineSpaces puts every portal on a line into a Matrix space named after
 	// the line. Beside the protocol sections rather than in one of them
 	// because it is room organisation, shared by both halves. Off stops new
-	// parents being named and nothing else -- see GetChatInfo.
+	// parents being named and nothing else -- see withLineParent.
 	LineSpaces bool `yaml:"line_spaces"`
 	// LineMembers names, per line, the Matrix users who get that line's space
 	// and dial room as soon as the bridge starts. Who is rung or texted stays
