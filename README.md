@@ -74,8 +74,10 @@ line_members:
 
 Each member gets a login and a dial room, `home ☎`, and with `line_spaces` on
 the line's space in their personal space, holding the dial room. Sending a number there (`+15551234567`, international
-format as for `!dial`) opens that member's room for it on the line, invites
-them, and answers with a link; `!dial <number>` there calls it on that line. A
+format as for `!call`) opens that member's room for it on the line, invites
+them, and answers with a link and the command to call it. There, `call <number>`
+calls it on that line, with or without the bridge's command prefix (`call`,
+`!call`; `dial` and `!dial` work too, and so does `!sip call`). A
 dial room is never a call or text target: its ID, `<line>-dial`, is refused as a
 number like a space's.
 
@@ -655,7 +657,7 @@ pkg/connector/             bridgev2 NetworkConnector and NetworkAPI (messaging)
   dialroom.go                the dial room that opens a number's room
   linemembers.go             line_members: the logins, and the space and dial room each gets
   client.go                  inbound and outbound SIP MESSAGE
-  commands.go                !dial, resolving a number to the portal it has
+  commands.go                !call (alias !dial), resolving a number to the portal it has
   config.go                  network config struct and upgrader
   health.go                  the two faults a call needs, as one bridge state
   readiness.go               the /_health/ready endpoint the k8s probe uses

@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,9 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
+
+	sipdb "github.com/lhns/matrix-sip-bridge/pkg/database"
+	"github.com/lhns/matrix-sip-bridge/pkg/phonenum"
 )
 
 // resync applies what a ChatResync for the portal would: its GetChatInfo,
@@ -367,13 +371,54 @@ func TestDialRoomOpensTheNumbersRoom(t *testing.T) {
 	if !strings.Contains(reply, "matrix.to") || !strings.Contains(reply, "opened:example.com") {
 		t.Errorf("reply %q has no link to the room", reply)
 	}
+	if !strings.Contains(reply, "`!call +15551234567`") {
+		t.Errorf("reply %q does not say how to call the number", reply)
+	}
 
 	reply = send("hello")
 	if len(got) != 1 {
 		t.Errorf("a non-number opened %+v", got[1:])
 	}
-	if !strings.Contains(reply, "not a usable number") {
-		t.Errorf("reply %q does not say the number is unusable", reply)
+	if !strings.Contains(reply, "not a usable number") || !strings.Contains(reply, "!call <number>") {
+		t.Errorf("reply %q does not say the number is unusable and how to call", reply)
+	}
+
+	// The call command, with or without a prefix, calls on the room's line.
+	type placed struct{ number, line string }
+	var calls []placed
+	sc.dialNumberFunc = func(_ context.Context, number, line string, _ id.UserID) (*sipdb.Call, error) {
+		calls = append(calls, placed{number, line})
+		return &sipdb.Call{PortalID: line + "-" + number, RoomID: "!portal:example.com"}, nil
+	}
+	for _, body := range []string{"!call +15551234567", "!DIAL +15551234567", "dial +15551234567", "Call +15551234567"} {
+		reply = send(body)
+		if !strings.Contains(reply, "Calling") || !strings.Contains(reply, "portal:example.com") {
+			t.Errorf("reply to %q = %q, want the call placed", body, reply)
+		}
+	}
+	reply = send("!call +15551234567 mobile")
+	want := []placed{{"+15551234567", "home"}, {"+15551234567", "home"}, {"+15551234567", "home"},
+		{"+15551234567", "home"}, {"+15551234567", "mobile"}}
+	if fmt.Sprint(calls) != fmt.Sprint(want) {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
+	if len(got) != 1 {
+		t.Errorf("a call command opened rooms: %+v", got[1:])
+	}
+
+	// A bad number after the command is an error reply, not a call.
+	sc.dialNumberFunc = func(context.Context, string, string, id.UserID) (*sipdb.Call, error) {
+		return nil, phonenum.ErrNotE164
+	}
+	if reply = send("!call 12ab"); !strings.Contains(reply, "not a usable number") {
+		t.Errorf("reply to a bad number = %q", reply)
+	}
+	if reply = send("!call"); !strings.Contains(reply, "Usage: `!sip call") {
+		t.Errorf("reply to a bare call = %q", reply)
+	}
+	// "calling" and "dialling" are not the command.
+	if reply = send("calling"); !strings.Contains(reply, "not a usable number") || len(calls) != 5 {
+		t.Errorf("reply to a word starting with call = %q", reply)
 	}
 }
 
