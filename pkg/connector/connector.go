@@ -36,6 +36,9 @@ type SIPConnector struct {
 	health     *callHealth
 	metrics    *metrics.Recorder
 
+	// openPortalFunc replaces openPortal in tests.
+	openPortalFunc func(ctx context.Context, portalID string, owner id.UserID) (id.RoomID, error)
+
 	// cancel stops the SIP endpoint and the call subsystem loops.
 	cancel context.CancelFunc
 }
@@ -74,11 +77,19 @@ func (sc *SIPConnector) Start(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	sc.cancel = cancel
 
+	// Before the migration, which would otherwise try to move the
+	// receiver-less space onto a key the receiver's own space holds.
+	if err := sc.repairLineSpaces(ctx); err != nil {
+		cancel()
+		return fmt.Errorf("repair line spaces: %w", err)
+	}
 	// Before the SIP endpoint: see migrateSharedLogin.
 	if err := sc.migrateSharedLogin(ctx); err != nil {
 		cancel()
 		return fmt.Errorf("migrate the shared login: %w", err)
 	}
+	// Before bridgev2 connects the logins, which sets up their rooms.
+	sc.ensureLineMemberLogins(ctx)
 
 	sip, err := siptransport.New(sc.Config.SIP, sc.br.Log.With().Str("component", "sip").Logger(), sc.metrics)
 	if err != nil {

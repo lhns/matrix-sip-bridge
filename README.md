@@ -42,9 +42,10 @@ membership into an encrypted room. See
 On by default, as `network.line_spaces`. Each portal room names its line's
 space as its parent, so a line's rooms are grouped under a space named after
 the line — `home-+15551234567` sits in
-`home`. The spaces are portals too, created by the bridge the first time a room
-on that line needs one; their IDs are `<line>-space`, which cannot be read as a
-number and is refused by every path that dials or texts. A portal with no line
+`home`. The spaces are portals too, one per user and line, created by the
+bridge the first time a room on that line needs one; their IDs are
+`<line>-space`, which cannot be read as a number and is refused by every path
+that dials or texts. A portal with no line
 (from before lines, or an inbound text whose host named no line) has no space
 and stays where it is. With `bridge.personal_filtering_spaces` on, the line
 spaces are added to that space too, and a new portal room goes only into its
@@ -56,6 +57,30 @@ anything: the space rooms, their `m.space.child` entries and the rooms already
 in them stay as they are, and a portal that is already a space is still
 described as one — bridgev2 refuses to change a room into or out of a space, so
 describing it as a number's DM would leave a DM room acting as a parent.
+
+## Line members and dial rooms
+
+`network.line_members` names, per line, the Matrix users who get that line's
+rooms as soon as the bridge starts, rather than with the first call or text for
+them:
+
+```yaml
+line_members:
+    home: ["@alice:example.com", "@bob:example.com"]
+```
+
+Each member gets a login, the line's space in their personal space, and in it a
+dial room, `home ☎`. Sending a number there (`+15551234567`, international
+format as for `!dial`) opens that member's room for it on the line, invites
+them, and answers with a link; `!dial <number>` there calls it on that line. A
+dial room is never a call or text target: its ID, `<line>-dial`, is refused as a
+number like a space's.
+
+Membership is not routing: who is rung and who gets a text is still the SIP
+server's decision, and a member need not be rung. A user `bridge.permissions`
+does not let log in is skipped with a warning. Removing a user deletes nothing;
+their rooms stay and the bridge logs the removal. The list is read at startup.
+See [ADR-0017](docs/adr/0017-line-members-and-dial-rooms.md).
 
 ## Renaming a portal room
 
@@ -380,6 +405,13 @@ kept until the clash is resolved by hand; everything else is moved regardless.
 With no old login and rooms still unowned, the rooms are left alone with a
 warning, because no owner is known.
 
+Version 0.2.0 could leave a user's rooms in a second, receiver-less copy of
+their line space, created on the first resync after the move. At startup, a
+receiver-less space whose rooms all belong to one user is moved to that user,
+replacing their own copy of the space only if it holds no rooms; it is listed in
+their personal space, and the replaced copy's entry there is removed. Its Matrix
+room is not touched.
+
 ### Double puppeting is required for calls
 
 A portal invite the user has not accepted makes calls unreachable rather than
@@ -610,6 +642,8 @@ pkg/connector/             bridgev2 NetworkConnector and NetworkAPI (messaging)
   connector.go               lifecycle, login loading, event-processor wiring
   logins.go                  recipient -> the user's own login, created on first mention
   migrate.go                 startup move of the old shared login's rooms to its owner
+  spaces.go                  a portal's line space under its own receiver, and its repair
+  dialroom.go                line members, and the dial room that opens a number's room
   client.go                  inbound and outbound SIP MESSAGE
   commands.go                !dial, resolving a number to the portal it has
   config.go                  network config struct and upgrader

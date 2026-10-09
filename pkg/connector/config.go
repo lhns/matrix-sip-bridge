@@ -4,6 +4,7 @@ import (
 	_ "embed"
 
 	"go.mau.fi/util/configupgrade"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/calls"
 	"github.com/lhns/matrix-sip-bridge/pkg/siptransport"
@@ -24,6 +25,10 @@ type Config struct {
 	// because it is room organisation, shared by both halves. Off stops new
 	// parents being named and nothing else -- see GetChatInfo.
 	LineSpaces bool `yaml:"line_spaces"`
+	// LineMembers names, per line, the Matrix users who get that line's space
+	// and dial room as soon as the bridge starts. Who is rung or texted stays
+	// the SIP server's routing; this is only who has rooms on the line.
+	LineMembers map[string][]id.UserID `yaml:"line_members"`
 }
 
 // MessageConfig is the text-messaging half.
@@ -48,6 +53,7 @@ func upgradeConfig(helper configupgrade.Helper) {
 	// Absent from an old config, Copy leaves the example config's true in
 	// place: the upgrade must not turn spaces off under a running deployment.
 	helper.Copy(configupgrade.Bool, "line_spaces")
+	helper.Copy(configupgrade.Map, "line_members")
 
 	helper.Copy(configupgrade.Str, "sip", "listen")
 	helper.Copy(configupgrade.Str, "sip", "transport")

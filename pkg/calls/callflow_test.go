@@ -679,44 +679,52 @@ func declineEvent(notify id.EventID) *event.Event {
 	}
 }
 
-// A line's space is a room, not a number. The conference header is the only
-// thing that names the portal and it comes off the wire, so a header naming a
-// space has to be refused before the room is touched -- otherwise a call
-// lands in the room that organises that line's rooms.
-func TestInboundCallRefusesAConferenceNamingALineSpace(t *testing.T) {
-	h := newHarness(t)
-	leg := newFakeInboundLeg()
-	leg.conference = "sip-home-space"
+// A line's space and dial room are rooms, not numbers. The conference header
+// is the only thing that names the portal and it comes off the wire, so a
+// header naming either has to be refused before the room is touched --
+// otherwise a call lands in a room that is not a conversation.
+func TestInboundCallRefusesAConferenceNamingALineRoom(t *testing.T) {
+	for _, portalID := range []string{"home-space", "home-dial"} {
+		t.Run(portalID, func(t *testing.T) {
+			h := newHarness(t)
+			leg := newFakeInboundLeg()
+			leg.conference = "sip-" + portalID
 
-	h.HandleInboundCall(t.Context(), leg)
+			h.HandleInboundCall(t.Context(), leg)
 
-	if _, rejects := leg.state(); len(rejects) != 1 || rejects[0] != 404 {
-		t.Errorf("the leg was rejected with %v, want one 404", rejects)
-	}
-	if got := h.mx.portalsAsked(); len(got) != 0 {
-		t.Errorf("a portal was looked up anyway: %v", got)
+			if _, rejects := leg.state(); len(rejects) != 1 || rejects[0] != 404 {
+				t.Errorf("the leg was rejected with %v, want one 404", rejects)
+			}
+			if got := h.mx.portalsAsked(); len(got) != 0 {
+				t.Errorf("a portal was looked up anyway: %v", got)
+			}
+		})
 	}
 }
 
 // The same refusal from the Matrix side. dial is where both the !dial command
-// and an RTC membership appearing in a room end up, so a space cannot be
+// and an RTC membership appearing in a room end up, so neither room can be
 // dialled from either.
-func TestDialRefusesALineSpace(t *testing.T) {
-	h := newHarness(t)
-	space := Portal{ID: "home-space", MXID: "!space:example.com"}
+func TestDialRefusesALineRoom(t *testing.T) {
+	for _, portalID := range []string{"home-space", "home-dial"} {
+		t.Run(portalID, func(t *testing.T) {
+			h := newHarness(t)
+			room := Portal{ID: portalID, MXID: "!room:example.com"}
 
-	if _, err := h.Dial(t.Context(), space, testCaller); err == nil {
-		t.Error("dialling a line's space succeeded")
-	}
-	if len(h.sip.invites) != 0 {
-		t.Errorf("an INVITE went out anyway: %v", h.sip.invites)
+			if _, err := h.Dial(t.Context(), room, testCaller); err == nil {
+				t.Error("dialling a line's room succeeded")
+			}
+			if len(h.sip.invites) != 0 {
+				t.Errorf("an INVITE went out anyway: %v", h.sip.invites)
+			}
+		})
 	}
 }
 
 // The spaces are portals too, so they turn up in the list a bare number is
 // resolved against. One is not a conversation with anyone.
-func TestPortalIDForNumberIgnoresLineSpaces(t *testing.T) {
-	got, err := portalIDForNumber("+15551234567", []string{"home-space", "work-space"})
+func TestPortalIDForNumberIgnoresLineRooms(t *testing.T) {
+	got, err := portalIDForNumber("+15551234567", []string{"home-space", "work-space", "home-dial"})
 	if err != nil {
 		t.Fatalf("portalIDForNumber: %v", err)
 	}
@@ -725,7 +733,7 @@ func TestPortalIDForNumberIgnoresLineSpaces(t *testing.T) {
 	}
 	// And a space alongside the real portal does not make the number
 	// ambiguous.
-	got, err = portalIDForNumber("+15551234567", []string{"home-space", "home-+15551234567"})
+	got, err = portalIDForNumber("+15551234567", []string{"home-space", "home-dial", "home-+15551234567"})
 	if err != nil || got != "home-+15551234567" {
 		t.Errorf("portalIDForNumber = (%q, %v), want the line-scoped portal", got, err)
 	}

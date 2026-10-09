@@ -276,3 +276,40 @@ func TestSpaceIDForRefusesABadLine(t *testing.T) {
 		}
 	}
 }
+
+// A dial room belongs to its line and is never a number, a space, or another
+// line's dial room.
+func TestDialIDIsALineRoomAndNotANumber(t *testing.T) {
+	for _, line := range []string{"home", "office-main", "line-2", "2", "foo-dial", "foo-space"} {
+		t.Run(line, func(t *testing.T) {
+			id, err := DialIDFor(line)
+			if err != nil {
+				t.Fatalf("DialIDFor(%q): %v", line, err)
+			}
+			if got := LineFromDialID(id); got != line {
+				t.Errorf("LineFromDialID(%q) = %q, want %q", id, got, line)
+			}
+			if !IsLineRoomID(id) {
+				t.Errorf("IsLineRoomID(%q) is false", id)
+			}
+			if IsSpaceID(id) {
+				t.Errorf("the dial room %q reads as a space", id)
+			}
+			if gotLine, number := SplitID(id); gotLine != "" || number != id {
+				t.Errorf("SplitID(%q) = (%q, %q), want the ID whole with no line", id, gotLine, number)
+			}
+			space, _ := SpaceIDFor(line)
+			if LineFromDialID(space) != "" {
+				t.Errorf("the space %q reads as a dial room", space)
+			}
+		})
+	}
+	for _, id := range []string{"home-+15551234567", "office-1001", "15551234567"} {
+		if IsLineRoomID(id) {
+			t.Errorf("the number portal %q reads as a line's room", id)
+		}
+	}
+	if _, err := DialIDFor("sip.example.com"); !errors.Is(err, ErrBadLine) {
+		t.Errorf("DialIDFor accepted a hostname: %v", err)
+	}
+}

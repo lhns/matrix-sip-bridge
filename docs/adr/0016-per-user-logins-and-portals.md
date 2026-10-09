@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Accepted, amended by [ADR-0017](0017-line-members-and-dial-rooms.md): the
+connector sets a portal's parent space itself, under the portal's receiver.
 
 Supersedes [ADR-0002](0002-relay-mode-instead-of-per-user-logins.md). Amends
 [ADR-0003](0003-portal-room-per-e164-number.md). The portal ID of

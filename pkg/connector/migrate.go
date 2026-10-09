@@ -135,6 +135,13 @@ func (sc *SIPConnector) reIDPortal(ctx context.Context, src *database.Portal, re
 		return false
 	}
 	log.Info().Stringer("room", src.MXID).Stringer("result", result).Msg("Moved a portal")
+	// The parent foreign key cascades to the children's rows, but not to
+	// children bridgev2 already has cached.
+	if isSpacePortal(src) {
+		if err := reparentChildren(ctx, br, target); err != nil {
+			log.Warn().Err(err).Msg("Could not re-parent the space's rooms")
+		}
+	}
 	return true
 }
 

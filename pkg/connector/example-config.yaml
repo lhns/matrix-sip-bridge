@@ -3,6 +3,15 @@
 # spaces or the rooms already in them, and a space room keeps working as one.
 line_spaces: true
 
+# Matrix users who get a line's rooms -- its space and its "<line> ☎" dial
+# room -- as soon as the bridge starts, rather than with the first call or text
+# for them. Who is rung or texted stays the SIP server's routing. A user
+# bridge.permissions does not let log in is skipped with a warning. Removing a
+# user deletes nothing: their rooms stay, and the bridge logs it.
+#   line_members:
+#       home: ["@alice:example.com", "@bob:example.com"]
+line_members: {}
+
 # The bridge as a SIP endpoint. It is a user agent the SIP server dials, not a
 # remote control for one PBX: call policy stays in the server's own routing.
 sip:

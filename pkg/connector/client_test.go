@@ -534,10 +534,13 @@ func portalFor(portalID string) *bridgev2.Portal {
 	}}
 }
 
-// Every portal on a line names that line's space as its parent, which is how
-// bridgev2 puts the room in it -- and creates the space if it does not exist.
-// A portal with no line has no space to go in and must stay parentless: there
-// is no default line.
+// Every portal on a line, its dial room included, is put into that line's
+// space, which bridgev2 creates if it does not exist. A portal with no line
+// has no space to go in and must stay parentless: there is no default line.
+//
+// Never through ChatInfo.ParentID: bridgev2 keys that parent without a
+// receiver, which is one space shared by every user. lineParent keys it
+// under the portal's own receiver; see TestResyncKeepsTheReceiversSpace.
 func TestChatInfoParentsAPortalOnItsLine(t *testing.T) {
 	tests := []struct {
 		portalID string
@@ -548,8 +551,11 @@ func TestChatInfoParentsAPortalOnItsLine(t *testing.T) {
 		{"office-main-+15551234567", "office-main-space"},
 		// A short number is still on a line.
 		{"office-1001", "office-space"},
+		{"home-dial", "home-space"},
 		// From before lines, and the key an inbound text with no line makes.
 		{"15551234567", ""},
+		// Lines do not nest.
+		{"home-space", ""},
 	}
 	sc := testClient(true)
 	for _, tt := range tests {
@@ -558,23 +564,17 @@ func TestChatInfoParentsAPortalOnItsLine(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetChatInfo: %v", err)
 			}
-			if tt.want == "" {
-				// nil, not the empty ID: an empty one would unparent the room.
-				if info.ParentID != nil {
-					t.Errorf("ParentID = %q, want no parent at all", *info.ParentID)
-				}
-				return
+			if info.ParentID != nil {
+				t.Errorf("ParentID = %q, which bridgev2 would key without a receiver", *info.ParentID)
 			}
-			if info.ParentID == nil || string(*info.ParentID) != tt.want {
-				t.Errorf("ParentID = %v, want %q", info.ParentID, tt.want)
+			space, ok := lineSpaceID(tt.portalID)
+			if got := string(space); got != tt.want || ok != (tt.want != "") {
+				t.Errorf("lineSpaceID = (%q, %v), want %q", got, ok, tt.want)
+			}
+			if (info.ExtraUpdates != nil) != (tt.want != "") {
+				t.Errorf("parent updater set = %v, want %v", info.ExtraUpdates != nil, tt.want != "")
 			}
 		})
-	}
-	// Two lines, two spaces.
-	home, _ := sc.GetChatInfo(context.Background(), portalFor("home-+15551234567"))
-	work, _ := sc.GetChatInfo(context.Background(), portalFor("work-+15551234567"))
-	if home.ParentID == nil || work.ParentID == nil || *home.ParentID == *work.ParentID {
-		t.Errorf("two lines share the space %v", home.ParentID)
 	}
 }
 
@@ -599,8 +599,8 @@ func TestChatInfoOfALineSpace(t *testing.T) {
 	if info.Members != nil {
 		t.Errorf("the space has a member list: %+v", info.Members)
 	}
-	if info.ParentID != nil {
-		t.Errorf("the space has a parent %q; lines do not nest", *info.ParentID)
+	if info.ParentID != nil || info.ExtraUpdates != nil {
+		t.Error("the space has a parent; lines do not nest")
 	}
 	// A space carries no messages, so it advertises no text length.
 	if feats := sc.GetCapabilities(context.Background(), portal); feats.MaxTextLength != 0 {
@@ -683,8 +683,8 @@ func TestChatInfoLeavesAUserRenamedRoomAlone(t *testing.T) {
 				if renamed.Members != nil {
 					t.Errorf("the space grew a member list: %+v", renamed.Members)
 				}
-				if renamed.ParentID != nil {
-					t.Errorf("the space grew the parent %q", *renamed.ParentID)
+				if renamed.ParentID != nil || renamed.ExtraUpdates != nil {
+					t.Error("the space grew a parent")
 				}
 				return
 			}
@@ -694,9 +694,8 @@ func TestChatInfoLeavesAUserRenamedRoomAlone(t *testing.T) {
 			if renamed.Members.IsFull {
 				t.Error("the member list must not be marked full")
 			}
-			if (renamed.ParentID == nil) != (info.ParentID == nil) ||
-				(renamed.ParentID != nil && *renamed.ParentID != *info.ParentID) {
-				t.Errorf("ParentID = %v, want %v", renamed.ParentID, info.ParentID)
+			if (renamed.ExtraUpdates == nil) != (info.ExtraUpdates == nil) {
+				t.Error("renaming the room changed whether it has a parent")
 			}
 		})
 	}
@@ -837,8 +836,8 @@ func TestLineSpacesOffNamesNoParent(t *testing.T) {
 		}
 		// nil, not the empty ID: an empty one would pull the room out of the
 		// space it is already in.
-		if info.ParentID != nil {
-			t.Errorf("%s named the parent %q with line_spaces off", portalID, *info.ParentID)
+		if info.ParentID != nil || info.ExtraUpdates != nil {
+			t.Errorf("%s named a parent with line_spaces off", portalID)
 		}
 		if info.Type == nil || *info.Type != database.RoomTypeDM {
 			t.Errorf("%s room type = %v, want %q", portalID, info.Type, database.RoomTypeDM)
@@ -867,8 +866,8 @@ func TestALineSpaceIsStillASpaceWithLineSpacesOff(t *testing.T) {
 	if info.Members != nil {
 		t.Errorf("the space grew a member list: %+v", info.Members)
 	}
-	if info.ParentID != nil {
-		t.Errorf("the space grew the parent %q", *info.ParentID)
+	if info.ParentID != nil || info.ExtraUpdates != nil {
+		t.Error("the space grew a parent")
 	}
 }
 
