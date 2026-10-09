@@ -3,10 +3,10 @@
 | ADR | Title | Status |
 |-----|-------|--------|
 | [0001](0001-bridgev2-for-messaging-bespoke-subsystem-for-calls.md) | bridgev2 for messaging, a bespoke subsystem for calls | Accepted |
-| [0002](0002-relay-mode-instead-of-per-user-logins.md) | Relay mode instead of per-user logins | Accepted |
-| [0003](0003-portal-room-per-e164-number.md) | A portal room per E.164 number | Amended by 0014 |
+| [0002](0002-relay-mode-instead-of-per-user-logins.md) | Relay mode instead of per-user logins | Superseded by 0016 |
+| [0003](0003-portal-room-per-e164-number.md) | A portal room per E.164 number | Amended by 0014, 0016 |
 | [0004](0004-ami-as-the-sole-asterisk-interface.md) | AMI as the sole Asterisk interface, not ARI | Superseded by 0008 |
-| [0005](0005-calls-bridged-as-media-via-livekit-sip.md) | Calls bridged as media via livekit-sip, not as notices | Amended by 0011 |
+| [0005](0005-calls-bridged-as-media-via-livekit-sip.md) | Calls bridged as media via livekit-sip, not as notices | Amended by 0011, 0016 |
 | [0006](0006-observing-inbound-rtc-membership.md) | Observing inbound RTC membership | Accepted |
 | [0007](0007-xmpp-path-in-the-asterisk-gateway-is-kept.md) | The XMPP path in the existing Asterisk gateway is kept | Superseded by 0009 |
 | [0008](0008-the-bridge-is-a-sip-endpoint.md) | The bridge is a SIP endpoint, not a manager client | Accepted |
@@ -17,3 +17,4 @@
 | [0013](0013-a-portal-is-a-direct-chat.md) | A portal is a direct chat | Accepted |
 | [0014](0014-a-portal-id-is-scoped-to-a-line.md) | A portal ID is scoped to a line and spells its own number | Accepted |
 | [0015](0015-audio-is-verified-from-livekit-sip-call-statistics.md) | Audio is verified from livekit-sip's call statistics, not from the bridge | Accepted |
+| [0016](0016-per-user-logins-and-portals.md) | Per-user logins and portals | Accepted |

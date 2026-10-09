@@ -4,6 +4,9 @@
 
 Accepted
 
+With per-user portals ([ADR-0016](0016-per-user-logins-and-portals.md)) each
+recipient is rung in their own room.
+
 ## Context
 
 ADR-0010 publishes an `org.matrix.msc3401.call.member` event as the ghost and
