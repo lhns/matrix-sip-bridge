@@ -269,11 +269,15 @@ func (cq *CallQuery) GetAllActive(ctx context.Context) ([]*Call, error) {
 	return cq.QueryMany(ctx, getAllActiveCallsQuery)
 }
 
-// EndAll marks every call ended.
+// EndAll marks every call ended and returns how many were open.
 //
 // Call state lives in LiveKit and the SIP server, not here; this table is only
 // a cache of it. After a bridge restart the cache is stale and every leg it
 // names is gone, so startup clears it rather than trying to resume.
-func (cq *CallQuery) EndAll(ctx context.Context) error {
-	return cq.Exec(ctx, endAllCallsQuery, time.Now().UnixMilli())
+func (cq *CallQuery) EndAll(ctx context.Context) (int64, error) {
+	res, err := cq.GetDB().Exec(ctx, endAllCallsQuery, time.Now().UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
