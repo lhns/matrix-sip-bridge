@@ -40,7 +40,11 @@ var (
 func (sc *SIPClient) Connect(ctx context.Context) {
 	// The startup context is cancelled once Connect returns, and the resync
 	// outlives it.
-	go sc.resyncPortals(context.WithoutCancel(ctx))
+	go func() {
+		ctx := context.WithoutCancel(ctx)
+		sc.resyncPortals(ctx)
+		sc.ensureLineRooms(ctx)
+	}()
 	// Unconditionally, unlike every later report: this is the first state the
 	// login ever has, so there is nothing for it to differ from. watchSIPHealth
 	// keeps it current from here on.
@@ -149,6 +153,9 @@ func (sc *SIPClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (*b
 	if line := phonenum.LineFromSpaceID(string(portal.ID)); line != "" {
 		return keepUserName(portal, spaceChatInfo(line)), nil
 	}
+	if line := phonenum.LineFromDialID(string(portal.ID)); line != "" {
+		return keepUserName(portal, sc.withLineParent(portal, dialChatInfo(line))), nil
+	}
 	info := &bridgev2.ChatInfo{
 		Name: ptr.Ptr(portalName(string(portal.ID))),
 		// A portal is one phone number and is inherently two-party. The room
@@ -179,17 +186,21 @@ func (sc *SIPClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (*b
 			},
 		},
 	}
-	// The line's space, which bridgev2 creates as a parent portal if it does
-	// not exist yet. A portal with no line stays parentless: there is no
-	// default line, and a nil ParentID leaves the parent alone where an empty
-	// one would unparent the room -- which is also how line_spaces off leaves
-	// a room already in a space where it is.
-	if sc.conn.Config.LineSpaces {
-		if space, err := phonenum.SpaceIDFor(phonenum.LineFromID(string(portal.ID))); err == nil {
-			info.ParentID = ptr.Ptr(networkid.PortalID(space))
-		}
+	return keepUserName(portal, sc.withLineParent(portal, info)), nil
+}
+
+// withLineParent names the portal's line's space as its parent, created if it
+// does not exist yet. A portal with no line stays parentless: there is no
+// default line. line_spaces off leaves the parent alone, so a room already in
+// a space stays there.
+func (sc *SIPClient) withLineParent(portal *bridgev2.Portal, info *bridgev2.ChatInfo) *bridgev2.ChatInfo {
+	if !sc.conn.Config.LineSpaces {
+		return info
 	}
-	return keepUserName(portal, info), nil
+	if space, ok := lineSpaceID(string(portal.ID)); ok {
+		info.ExtraUpdates = sc.lineParent(space)
+	}
+	return info
 }
 
 // portalEventPowerLevels is what a portal room lets a plain user send.
@@ -275,6 +286,9 @@ func bridgeRoomName(portalID string) string {
 	if line := phonenum.LineFromSpaceID(portalID); line != "" {
 		return line
 	}
+	if line := phonenum.LineFromDialID(portalID); line != "" {
+		return dialRoomName(line)
+	}
 	return portalName(portalID)
 }
 
@@ -357,6 +371,10 @@ func (sc *SIPClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	if phonenum.IsSpaceID(string(msg.Portal.ID)) {
 		return nil, fmt.Errorf("a line's space carries no messages")
 	}
+	// A dial room's messages are numbers to open a room for, never texts.
+	if line := phonenum.LineFromDialID(string(msg.Portal.ID)); line != "" {
+		return sc.handleDialRoomMessage(ctx, msg, line)
+	}
 	if !sc.conn.Config.Messages.Enabled {
 		return nil, fmt.Errorf("messaging is disabled")
 	}
@@ -384,12 +402,18 @@ func (sc *SIPClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	// A 200 to a SIP MESSAGE carries no message identifier, so the bridge
 	// mints one. It is only ever used for local deduplication: there is no
 	// delivery report to correlate it with.
+	return outboundResponse(), nil
+}
+
+// outboundResponse is what bridgev2 records for a Matrix message the bridge
+// handled.
+func outboundResponse() *bridgev2.MatrixMessageResponse {
 	return &bridgev2.MatrixMessageResponse{
 		DB: &database.Message{
 			ID:       networkid.MessageID("out-" + strconv.FormatInt(time.Now().UnixNano(), 36)),
 			SenderID: outboundSenderID,
 		},
-	}, nil
+	}
 }
 
 // outboundSenderID is the sender recorded on a message sent to SIP. It is the

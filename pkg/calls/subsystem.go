@@ -1370,6 +1370,12 @@ func (e *AmbiguousNumberError) Error() string {
 // portal ID is an error here and an unroutable one is the SIP server's to
 // refuse. Silently dropping it would put the call in a different portal from
 // the one that line's inbound calls land in.
+// PortalRoom returns owner's room for a portal, creating it and putting owner
+// in it as a call would.
+func (s *Subsystem) PortalRoom(ctx context.Context, portalID string, owner id.UserID) (Portal, error) {
+	return s.mx.PortalRoom(ctx, portalID, owner)
+}
+
 func (s *Subsystem) DialNumber(ctx context.Context, number, line string, caller id.UserID) (*database.Call, error) {
 	portalID, err := s.dialPortalID(ctx, number, line, caller)
 	if err != nil {

@@ -34,10 +34,15 @@ func (sc *SIPConnector) dialCommand() *commands.FullHandler {
 			if strings.TrimSpace(ce.RawArgs) == "" {
 				ce.Reply("Usage: `$cmdprefix dial <phone number> [line]`, the number in international " +
 					"format, e.g. `+15551234567 home`. Without a line the call joins the room the " +
-					"number already has; a line is needed for a number with rooms on several.")
+					"number already has; a line is needed for a number with rooms on several. In a " +
+					"line's dial room the line is that one.")
 				return
 			}
 			number, line := splitDialArgs(ce.RawArgs)
+			// In a line's dial room, the line is that one.
+			if line == "" && ce.Portal != nil {
+				line = phonenum.LineFromDialID(string(ce.Portal.ID))
+			}
 			if _, err := sc.logins.Login(ce.Ctx, string(ce.User.MXID)); errors.Is(err, calls.ErrRecipientRefused) {
 				ce.Reply("You are not permitted to use this bridge.")
 				return
