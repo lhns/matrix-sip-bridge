@@ -4,7 +4,9 @@
 
 Accepted
 
-Amends [ADR-0003](0003-portal-room-per-e164-number.md).
+Amends [ADR-0003](0003-portal-room-per-e164-number.md). Amended by
+[ADR-0017](0017-line-members-and-dial-rooms.md): the bridge is told which Matrix
+users are members of a line; routing stays in the SIP server.
 
 ## Context
 
