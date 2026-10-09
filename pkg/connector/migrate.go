@@ -51,13 +51,10 @@ func (sc *SIPConnector) migrateSharedLogin(ctx context.Context) error {
 	}
 	owner := id.UserID(br.DB.KV.Get(ctx, keyDefaultRecipient))
 
-	all, err := br.DB.Portal.GetAllWithoutReceiver(ctx)
+	portals, err := portalsWithoutReceiver(ctx, br)
 	if err != nil {
-		return fmt.Errorf("list portals without a receiver: %w", err)
+		return err
 	}
-	// The query also returns children whose parent_receiver is empty but whose
-	// own receiver is set; those belong to someone already.
-	portals := slices.DeleteFunc(all, func(p *database.Portal) bool { return p.Receiver != "" })
 	if legacy == nil && len(portals) == 0 {
 		return nil
 	}
@@ -163,6 +160,17 @@ func transferSpace(ctx context.Context, from, to *bridgev2.UserLogin) error {
 		return fmt.Errorf("clear the space on the shared login: %w", err)
 	}
 	return nil
+}
+
+// portalsWithoutReceiver lists the portals keyed with no receiver.
+func portalsWithoutReceiver(ctx context.Context, br *bridgev2.Bridge) ([]*database.Portal, error) {
+	all, err := br.DB.Portal.GetAllWithoutReceiver(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list portals without a receiver: %w", err)
+	}
+	// The query also returns children whose parent_receiver is empty but whose
+	// own receiver is set; those belong to someone already.
+	return slices.DeleteFunc(all, func(p *database.Portal) bool { return p.Receiver != "" }), nil
 }
 
 func isSpacePortal(p *database.Portal) bool {

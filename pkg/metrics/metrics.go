@@ -62,10 +62,10 @@ const (
 	TrunkError = "error"
 )
 
-// Inbound message outcomes. Everything but MessageBridged is a text the far
-// end considers delivered -- the bridge answers 200 to an unusable sender on
-// purpose, so the far end does not retry -- which is why they are counted at
-// all: nothing else makes those drops visible.
+// Inbound message outcomes. A drop is a text the far end considers delivered
+// -- the bridge answers 200 to an unusable sender on purpose, so the far end
+// does not retry -- which is why drops are counted at all: nothing else makes
+// them visible.
 const (
 	MessageBridged          = "bridged"
 	MessageDroppedBadSender = "dropped_unparseable_sender"

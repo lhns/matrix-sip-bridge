@@ -81,14 +81,19 @@ func (sc *SIPClient) resyncPortals(ctx context.Context) {
 		if !shouldResyncPortal(ctx, br.Matrix, portal, sc.UserLogin.UserMXID, &log) {
 			continue
 		}
-		sc.conn.enqueue(sc.UserLogin, &simplevent.ChatResync{
-			EventMeta: simplevent.EventMeta{
-				Type:      bridgev2.RemoteEventChatResync,
-				PortalKey: portal.PortalKey,
-			},
-			GetChatInfoFunc: sc.GetChatInfo,
-		})
+		sc.queueResync(portal.PortalKey)
 	}
+}
+
+// queueResync has bridgev2 re-read a portal's chat info from GetChatInfo.
+func (sc *SIPClient) queueResync(key networkid.PortalKey) {
+	sc.conn.enqueue(sc.UserLogin, &simplevent.ChatResync{
+		EventMeta: simplevent.EventMeta{
+			Type:      bridgev2.RemoteEventChatResync,
+			PortalKey: key,
+		},
+		GetChatInfoFunc: sc.GetChatInfo,
+	})
 }
 
 // memberLister is the one call shouldResyncPortal needs of the Matrix
@@ -271,13 +276,7 @@ func (sc *SIPClient) resyncPortalName(portal *bridgev2.Portal) {
 	if portal.MXID == "" {
 		return
 	}
-	sc.UserLogin.Bridge.QueueRemoteEvent(sc.UserLogin, &simplevent.ChatResync{
-		EventMeta: simplevent.EventMeta{
-			Type:      bridgev2.RemoteEventChatResync,
-			PortalKey: portal.PortalKey,
-		},
-		GetChatInfoFunc: sc.GetChatInfo,
-	})
+	sc.queueResync(portal.PortalKey)
 }
 
 // bridgeRoomName is the name the bridge gives a portal: the line for a line's

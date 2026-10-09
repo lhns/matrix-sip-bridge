@@ -23,8 +23,9 @@ call.
 ## Decision
 
 - `network.line_members: {<line>: [<mxid>, …]}` names who has a line's rooms.
-  At startup each member who `bridge.permissions` lets log in gets a login,
-  the line's space in their personal space, and a dial room in that space.
+  At startup each member who `bridge.permissions` lets log in gets a login and
+  a dial room, and with `line_spaces` on the line's space in their personal
+  space, holding the dial room.
   Others are skipped with a warning. Removing a member deletes nothing; it is
   logged. The deployment generates the list from its routing, so it is not a
   second place to keep routing correct: the bridge still never decides who is

@@ -69,8 +69,8 @@ line_members:
     home: ["@alice:example.com", "@bob:example.com"]
 ```
 
-Each member gets a login, the line's space in their personal space, and in it a
-dial room, `home ☎`. Sending a number there (`+15551234567`, international
+Each member gets a login and a dial room, `home ☎`, and with `line_spaces` on
+the line's space in their personal space, holding the dial room. Sending a number there (`+15551234567`, international
 format as for `!dial`) opens that member's room for it on the line, invites
 them, and answers with a link; `!dial <number>` there calls it on that line. A
 dial room is never a call or text target: its ID, `<line>-dial`, is refused as a
