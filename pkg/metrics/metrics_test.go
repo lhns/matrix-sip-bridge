@@ -16,7 +16,7 @@ var families = map[string]int{
 	"sip_bridge_call_setup_seconds":           2,  // 2 directions
 	"sip_bridge_sip_registered":               1,
 	"sip_bridge_trunk_reconcile_total":        2,
-	"sip_bridge_messages_total":               10, // 6 inbound outcomes + 4 outbound
+	"sip_bridge_messages_total":               9, // 5 inbound outcomes + 4 outbound
 	"sip_bridge_start_timestamp_seconds":      1,
 	"sip_bridge_sip_listen_timestamp_seconds": 1,
 }

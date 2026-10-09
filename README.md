@@ -3,7 +3,8 @@
 [![CI](https://github.com/lhns/matrix-sip-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/lhns/matrix-sip-bridge/actions/workflows/ci.yml)
 
 A Matrix bridge that is a SIP endpoint. Text messages and phone calls both land
-in a portal room per phone number, one set of rooms per Matrix user: an inbound SIP MESSAGE appears as an
+in a portal room per phone number, one set of rooms per Matrix user: an inbound
+SIP MESSAGE appears as an
 `m.room.message` from a per-number ghost, and a Matrix message in that room goes
 back out as a SIP MESSAGE. A call is bridged as real media, not as a
 notification — the SIP server parks the far end in a conference and

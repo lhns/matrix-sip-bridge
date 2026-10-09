@@ -69,7 +69,6 @@ const (
 const (
 	MessageBridged          = "bridged"
 	MessageDroppedBadSender = "dropped_unparseable_sender"
-	MessageDroppedNoLogin   = "dropped_no_login"
 	// MessageRefusedRecipient is a recipient header naming nobody the bridge
 	// may deliver to; unlike the drops it is answered with a failure status.
 	MessageRefusedRecipient  = "refused_recipient"
@@ -89,7 +88,7 @@ const (
 
 var (
 	callOutcomes            = []string{OutcomeAnswered, OutcomeMissed, OutcomeDeclined, OutcomeFailed, OutcomeStale, OutcomeAnsweredElsewhere}
-	inboundMessageOutcomes  = []string{MessageBridged, MessageDroppedBadSender, MessageDroppedNoLogin, MessageRefusedRecipient, MessageRejectedMediaType, MessageRejectedNoHandler}
+	inboundMessageOutcomes  = []string{MessageBridged, MessageDroppedBadSender, MessageRefusedRecipient, MessageRejectedMediaType, MessageRejectedNoHandler}
 	outboundMessageOutcomes = []string{MessageSent, MessageRejected, MessageTooLong, MessageError}
 )
 
