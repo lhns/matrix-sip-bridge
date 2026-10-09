@@ -355,7 +355,8 @@ func newFakeInboundLeg() *fakeInboundLeg {
 	return &fakeInboundLeg{done: make(chan struct{})}
 }
 
-func (l *fakeInboundLeg) From() string { return "sip:caller@example.com" }
+func (l *fakeInboundLeg) From() string      { return "sip:caller@example.com" }
+func (l *fakeInboundLeg) Recipient() string { return "" }
 func (l *fakeInboundLeg) Conference() string {
 	if l.conference != "" {
 		return l.conference

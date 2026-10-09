@@ -80,7 +80,7 @@ func (sc *SIPConnector) Start(ctx context.Context) error {
 	}
 	sc.sip = sip
 	sc.calls = calls.New(
-		sc.Config.Calls, sc.br, networkid.UserLoginID(LoginID),
+		sc.Config.Calls, sc.br, legacyLogins{sc.br},
 		sipTelephony{sip, sc.Config.SIP.ConferenceHeader, sc.Config.SIP.CallerHeader}, sc.db,
 		sc.br.Log.With().Str("component", "calls").Logger(), sc.metrics,
 	)
@@ -350,3 +350,15 @@ func (sl *SIPLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
 }
 
 func (sl *SIPLogin) Cancel() {}
+
+// legacyLogins is a placeholder for the per-user login resolver: it answers
+// every recipient with the shared login.
+type legacyLogins struct{ br *bridgev2.Bridge }
+
+func (l legacyLogins) Login(_ context.Context, _ string) (*bridgev2.UserLogin, error) {
+	login := l.br.GetCachedUserLoginByID(networkid.UserLoginID(LoginID))
+	if login == nil {
+		return nil, calls.ErrUnknownRecipient
+	}
+	return login, nil
+}

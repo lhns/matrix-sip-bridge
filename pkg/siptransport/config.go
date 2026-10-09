@@ -51,6 +51,11 @@ type Config struct {
 	// Empty by default, and empty sends no header, so a server that does not
 	// want one is unaffected and this is its own kill switch.
 	CallerHeader string `yaml:"caller_header"`
+
+	// RecipientHeader names the header on an inbound INVITE or MESSAGE that
+	// says which Matrix user it is for, e.g. X-Matrix-Recipient:
+	// @alice:example.com. Absent on the wire means the default recipient.
+	RecipientHeader string `yaml:"recipient_header"`
 }
 
 // RegisterConfig is the bridge's registration with the SIP server.
@@ -81,6 +86,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.ConferenceHeader == "" {
 		c.ConferenceHeader = "X-Conference"
+	}
+	if c.RecipientHeader == "" {
+		c.RecipientHeader = "X-Matrix-Recipient"
 	}
 	if c.MediaPort <= 0 {
 		c.MediaPort = 40000

@@ -14,7 +14,6 @@ import (
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
-	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
@@ -35,6 +34,9 @@ type InboundLeg interface {
 	From() string
 	// Conference is the conference the caller will land in.
 	Conference() string
+	// Recipient is the recipient header's value: the Matrix user this leg
+	// rings, or "" for the default recipient. See Logins.
+	Recipient() string
 	Ringing() error
 	Answer() error
 	Reject(code int, reason string) error
@@ -182,7 +184,7 @@ type Subsystem struct {
 func (s *Subsystem) OnTrunkState(fn func(error)) { s.onTrunkState.Store(&fn) }
 
 // New builds the subsystem. Start does the work.
-func New(cfg Config, br *bridgev2.Bridge, loginID networkid.UserLoginID, sip Telephony, db *database.Database, log zerolog.Logger, rec *metrics.Recorder) *Subsystem {
+func New(cfg Config, br *bridgev2.Bridge, logins Logins, sip Telephony, db *database.Database, log zerolog.Logger, rec *metrics.Recorder) *Subsystem {
 	if cfg.MembershipExpiry <= 0 {
 		cfg.MembershipExpiry = 6 * time.Hour
 	}
@@ -197,7 +199,7 @@ func New(cfg Config, br *bridgev2.Bridge, loginID networkid.UserLoginID, sip Tel
 	}
 	return &Subsystem{
 		cfg:      cfg,
-		mx:       newBridgeSide(br, loginID, log),
+		mx:       newBridgeSide(br, logins, log),
 		sip:      sip,
 		lk:       NewLiveKitClient(cfg.LiveKit),
 		db:       db,

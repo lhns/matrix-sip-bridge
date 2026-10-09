@@ -80,10 +80,8 @@ type bridgeSide struct {
 	br  *bridgev2.Bridge
 	log zerolog.Logger
 
-	// loginID names the bridge's one static UserLogin. Every portal bridgev2
-	// creates needs it as the source; there is no per-user login to take it
-	// from.
-	loginID networkid.UserLoginID
+	// logins resolves the UserLogin a portal is created on behalf of.
+	logins Logins
 
 	// repaired names the portal rooms already known to carry the power levels
 	// a call needs, so reapplyChatInfo reads them once rather than on every
@@ -91,8 +89,8 @@ type bridgeSide struct {
 	repaired sync.Map // id.RoomID -> struct{}
 }
 
-func newBridgeSide(br *bridgev2.Bridge, loginID networkid.UserLoginID, log zerolog.Logger) *bridgeSide {
-	return &bridgeSide{br: br, loginID: loginID, log: log}
+func newBridgeSide(br *bridgev2.Bridge, logins Logins, log zerolog.Logger) *bridgeSide {
+	return &bridgeSide{br: br, logins: logins, log: log}
 }
 
 func (b *bridgeSide) GhostIntent(ctx context.Context, portalID string) (GhostIntent, error) {
@@ -109,7 +107,7 @@ func (b *bridgeSide) PortalRoom(ctx context.Context, portalID string) (Portal, e
 	if err != nil {
 		return Portal{}, fmt.Errorf("get portal %s: %w", portalID, err)
 	}
-	source, err := b.sourceLogin()
+	source, err := b.logins.Login(ctx, "")
 	if err != nil {
 		return Portal{}, err
 	}
@@ -214,17 +212,4 @@ func callPowerLevelsApplied(levels *event.PowerLevelsEventContent) bool {
 		}
 	}
 	return true
-}
-
-// sourceLogin returns the login every portal is created on behalf of.
-//
-// bridgev2 dereferences the source unconditionally while creating a room, so a
-// call arriving before anyone has logged in has to fail here rather than panic
-// inside the portal machinery.
-func (b *bridgeSide) sourceLogin() (*bridgev2.UserLogin, error) {
-	login := b.br.GetCachedUserLoginByID(b.loginID)
-	if login == nil {
-		return nil, fmt.Errorf("no %q login yet; nobody has logged in", b.loginID)
-	}
-	return login, nil
 }
