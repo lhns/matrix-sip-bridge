@@ -153,20 +153,13 @@ const spaceIDSuffix = "-space"
 // The line is checked as MakeID checks it: a name that cannot be spelled into
 // a portal ID gets no space at all rather than a mis-keyed one.
 func SpaceIDFor(line string) (string, error) {
-	if !lineName.MatchString(line) {
-		return "", fmt.Errorf("%w: %q", ErrBadLine, line)
-	}
-	return line + spaceIDSuffix, nil
+	return lineRoomID(line, spaceIDSuffix)
 }
 
 // LineFromSpaceID is the line a space portal ID names, empty for an ID that is
 // not one.
 func LineFromSpaceID(id string) string {
-	line, ok := strings.CutSuffix(id, spaceIDSuffix)
-	if !ok || !lineName.MatchString(line) {
-		return ""
-	}
-	return line
+	return lineFromRoomID(id, spaceIDSuffix)
 }
 
 // IsSpaceID reports whether a portal ID names a line's space. A space is room
@@ -184,20 +177,13 @@ const dialIDSuffix = "-dial"
 
 // DialIDFor is the portal ID of a line's dial room.
 func DialIDFor(line string) (string, error) {
-	if !lineName.MatchString(line) {
-		return "", fmt.Errorf("%w: %q", ErrBadLine, line)
-	}
-	return line + dialIDSuffix, nil
+	return lineRoomID(line, dialIDSuffix)
 }
 
 // LineFromDialID is the line a dial room portal ID names, empty for an ID
 // that is not one.
 func LineFromDialID(id string) string {
-	line, ok := strings.CutSuffix(id, dialIDSuffix)
-	if !ok || !lineName.MatchString(line) {
-		return ""
-	}
-	return line
+	return lineFromRoomID(id, dialIDSuffix)
 }
 
 // IsLineRoomID reports whether a portal ID names a room that belongs to a line
@@ -205,4 +191,19 @@ func LineFromDialID(id string) string {
 // dialled, texted, or turned into a number.
 func IsLineRoomID(id string) bool {
 	return IsSpaceID(id) || LineFromDialID(id) != ""
+}
+
+func lineRoomID(line, suffix string) (string, error) {
+	if !lineName.MatchString(line) {
+		return "", fmt.Errorf("%w: %q", ErrBadLine, line)
+	}
+	return line + suffix, nil
+}
+
+func lineFromRoomID(id, suffix string) string {
+	line, ok := strings.CutSuffix(id, suffix)
+	if !ok || !lineName.MatchString(line) {
+		return ""
+	}
+	return line
 }
