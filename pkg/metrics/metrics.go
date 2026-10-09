@@ -51,6 +51,9 @@ const (
 	// It leaves no record in the room, but a rising rate of it is a bug in the
 	// teardown paths, so it is counted rather than folded into "missed".
 	OutcomeStale = "stale"
+	// OutcomeAnsweredElsewhere is a leg another recipient's leg of the same
+	// call won. Every leg is counted, so one call can count several times.
+	OutcomeAnsweredElsewhere = "answered_elsewhere"
 )
 
 // Trunk reconcile results.
@@ -64,9 +67,12 @@ const (
 // purpose, so the far end does not retry -- which is why they are counted at
 // all: nothing else makes those drops visible.
 const (
-	MessageBridged           = "bridged"
-	MessageDroppedBadSender  = "dropped_unparseable_sender"
-	MessageDroppedNoLogin    = "dropped_no_login"
+	MessageBridged          = "bridged"
+	MessageDroppedBadSender = "dropped_unparseable_sender"
+	MessageDroppedNoLogin   = "dropped_no_login"
+	// MessageRefusedRecipient is a recipient header naming nobody the bridge
+	// may deliver to; unlike the drops it is answered with a failure status.
+	MessageRefusedRecipient  = "refused_recipient"
 	MessageRejectedMediaType = "rejected_content_type"
 	MessageRejectedNoHandler = "rejected_no_handler"
 )
@@ -82,8 +88,8 @@ const (
 )
 
 var (
-	callOutcomes            = []string{OutcomeAnswered, OutcomeMissed, OutcomeDeclined, OutcomeFailed, OutcomeStale}
-	inboundMessageOutcomes  = []string{MessageBridged, MessageDroppedBadSender, MessageDroppedNoLogin, MessageRejectedMediaType, MessageRejectedNoHandler}
+	callOutcomes            = []string{OutcomeAnswered, OutcomeMissed, OutcomeDeclined, OutcomeFailed, OutcomeStale, OutcomeAnsweredElsewhere}
+	inboundMessageOutcomes  = []string{MessageBridged, MessageDroppedBadSender, MessageDroppedNoLogin, MessageRefusedRecipient, MessageRejectedMediaType, MessageRejectedNoHandler}
 	outboundMessageOutcomes = []string{MessageSent, MessageRejected, MessageTooLong, MessageError}
 )
 
