@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"go.mau.fi/util/ptr"
 	"maunium.net/go/mautrix/bridgev2"
@@ -27,7 +28,7 @@ func dialRoomName(line string) string {
 func dialChatInfo(line string) *bridgev2.ChatInfo {
 	return &bridgev2.ChatInfo{
 		Name:  ptr.Ptr(dialRoomName(line)),
-		Topic: ptr.Ptr("Send a phone number to open its room on " + line + ", or `!dial <number>` to call it."),
+		Topic: ptr.Ptr("Send a phone number to open its room on " + line + ", or `!call <number>` to call it."),
 		Type:  ptr.Ptr(database.RoomTypeDefault),
 	}
 }
@@ -38,13 +39,21 @@ func dialChatInfo(line string) *bridgev2.ChatInfo {
 func (sc *SIPClient) handleDialRoomMessage(ctx context.Context, msg *bridgev2.MatrixMessage, line string) (*bridgev2.MatrixMessageResponse, error) {
 	typed := strings.TrimSpace(msg.Content.Body)
 	var reply string
-	if portalID, err := phonenum.IDFor(line, typed); err != nil {
+	if args, ok := dialRoomCommand(typed); ok {
+		// The bridge's command prefix is not needed here, so bridgev2 never
+		// sees this as a command; run it the same way.
+		prefix := sc.UserLogin.Bridge.Config.CommandPrefix
+		sc.conn.runDial(ctx, msg.Event.Sender, args, line, func(f string, a ...any) {
+			reply = strings.ReplaceAll(fmt.Sprintf(f, a...), "$cmdprefix", prefix)
+		})
+	} else if portalID, err := phonenum.IDFor(line, typed); err != nil {
 		reply = fmt.Sprintf("`%s` is not a usable number: %v. Write it in international format, "+
-			"e.g. `+15551234567`.", typed, err)
+			"e.g. `+15551234567`, or `!call <number>` to call it.", typed, err)
 	} else if room, err := sc.conn.openPortal(ctx, portalID, sc.UserLogin.UserMXID); err != nil {
 		reply = fmt.Sprintf("Failed to open the room for %s: %v", portalName(portalID), err)
 	} else {
-		reply = fmt.Sprintf("[%s](%s)", portalName(portalID), room.URI().MatrixToURL())
+		reply = fmt.Sprintf("[%s](%s) · send `!call %s` to call it",
+			portalName(portalID), room.URI().MatrixToURL(), phonenum.NumberFromID(portalID))
 	}
 	content := format.RenderMarkdown(reply, true, false)
 	content.MsgType = event.MsgNotice
@@ -53,6 +62,21 @@ func (sc *SIPClient) handleDialRoomMessage(ctx context.Context, msg *bridgev2.Ma
 		return nil, fmt.Errorf("reply in the dial room: %w", err)
 	}
 	return outboundResponse(), nil
+}
+
+// dialRoomCommand reports whether a dial room message is a call command, with
+// or without the bridge's command prefix: "call", "dial", "!call" or "!dial",
+// in any case. It returns the rest as arguments.
+func dialRoomCommand(text string) (args string, ok bool) {
+	first, rest := text, ""
+	if i := strings.IndexFunc(text, unicode.IsSpace); i >= 0 {
+		first, rest = text[:i], text[i:]
+	}
+	switch strings.ToLower(first) {
+	case "call", "dial", "!call", "!dial":
+		return strings.TrimSpace(rest), true
+	}
+	return "", false
 }
 
 // openPortal returns owner's room for a number, creating it and inviting them

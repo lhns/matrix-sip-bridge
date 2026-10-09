@@ -38,6 +38,8 @@ type SIPConnector struct {
 
 	// openPortalFunc replaces openPortal in tests.
 	openPortalFunc func(ctx context.Context, portalID string, owner id.UserID) (id.RoomID, error)
+	// dialNumberFunc replaces calls.Subsystem.DialNumber in tests.
+	dialNumberFunc func(ctx context.Context, number, line string, caller id.UserID) (*sipdb.Call, error)
 
 	// cancel stops the SIP endpoint and the call subsystem loops.
 	cancel context.CancelFunc

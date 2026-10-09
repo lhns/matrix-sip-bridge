@@ -6,6 +6,14 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-09
+### Added
+- Dial room: `call <number>` (also `!call`, `dial`, `!dial`) now works there without the bridge's command prefix, and calls on that room's line. A line may be given last, as with the command (`call +15551234567 mobile`).
+
+### Changed
+- The `!dial` command is now `!call`; `!dial` still works as an alias.
+- The dial room's reply to a number, its "not a usable number" reply and its topic now say how to call the number: `` `!call <number>` ``.
+
 ## [0.2.2] - 2026-10-09
 ### Fixed
 - A room whose line space, or link to it, failed to be created is now retried on its next resync instead of staying unlinked.
@@ -63,7 +71,8 @@ First tagged release of the Matrix <-> SIP bridge.
 - A space cannot be renamed by a user at the default power level.
 - An inbound SMS cannot tell two DIDs apart on a trunk that does not echo the bridge's Contact; it falls back to that host's default line and says so in the log.
 
-[Unreleased]: https://github.com/lhns/matrix-sip-bridge/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/lhns/matrix-sip-bridge/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/lhns/matrix-sip-bridge/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/lhns/matrix-sip-bridge/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/lhns/matrix-sip-bridge/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/lhns/matrix-sip-bridge/compare/v0.1.0...v0.2.0
