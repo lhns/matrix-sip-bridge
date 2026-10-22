@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -50,15 +51,26 @@ func (s *memStore) Heads(_ context.Context, limit int) ([]*database.InboundMessa
 	if s.down {
 		return nil, errDown
 	}
-	var out []*database.InboundMessage
-	seen := map[string]bool{}
+	before := func(a, b *database.InboundMessage) bool {
+		return a.ReceivedAt.Before(b.ReceivedAt) || a.ReceivedAt.Equal(b.ReceivedAt) && a.ID < b.ID
+	}
+	heads := map[string]*database.InboundMessage{}
 	for _, r := range s.rows {
-		if key := r.LoginID + r.PortalID; !seen[key] && len(out) < limit {
-			seen[key] = true
-			out = append(out, r)
+		if key := r.LoginID + r.PortalID; heads[key] == nil || before(r, heads[key]) {
+			heads[key] = r
 		}
 	}
-	return out, nil
+	var out []*database.InboundMessage
+	for _, r := range heads {
+		out = append(out, r)
+	}
+	slices.SortFunc(out, func(a, b *database.InboundMessage) int {
+		if before(a, b) {
+			return -1
+		}
+		return 1
+	})
+	return out[:min(limit, len(out))], nil
 }
 
 func (s *memStore) Delete(_ context.Context, id int64) error {
@@ -360,6 +372,28 @@ func TestWorkerDoesNotLetOnePortalBlockOthers(t *testing.T) {
 	}
 	if got := strings.Join(store.uids(), ","); got != "a1,a2" {
 		t.Errorf("rows = %s, want a1,a2 kept", got)
+	}
+}
+
+// A text drained from the spool after a later one reached the database is
+// still delivered first: delivery follows receive time, not row id.
+func TestWorkerDeliversInReceiveOrderAfterASpoolDrain(t *testing.T) {
+	store, dir := &memStore{down: true}, t.TempDir()
+	q := newQueue(t, store, dir)
+	if _, err := q.Persist(context.Background(), msg("early", "p", 1)); err != nil { // spooled
+		t.Fatal(err)
+	}
+	store.setDown(false)
+	if _, err := q.Persist(context.Background(), msg("late", "p", 2)); err != nil { // row 1
+		t.Fatal(err)
+	}
+	if err := q.Drain(context.Background()); err != nil { // row 2
+		t.Fatal(err)
+	}
+	f := &fakeDeliver{}
+	settle(q, f.fn)
+	if got := strings.Join(f.delivered, ","); got != "early,late" {
+		t.Errorf("delivered = %s, want early,late", got)
 	}
 }
 

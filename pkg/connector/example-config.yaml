@@ -76,8 +76,8 @@ messages:
     # in the database before the SIP server is answered 200; if the database
     # cannot take it, it is written here instead and moved into the database
     # when it is back. Empty disables the backup: the text is then refused
-    # (SIP 500) while the database is down. Mount a small persistent volume
-    # here; on an emptyDir the backup does not survive a pod restart.
+    # (SIP 500) while the database is down. Mount a small emptyDir here
+    # (survives a container restart, not pod deletion); a PVC is optional.
     spool_dir: ""
 
 # Call bridging: real media, via a conference on the SIP server and

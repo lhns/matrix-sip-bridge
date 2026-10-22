@@ -36,9 +36,10 @@ buffered, lost texts with no trace.
   delivered concurrently (at most 8), because the synchronous call can block
   for hours against an unreachable homeserver; a blocked portal then holds
   back only itself, and a portal with many waiting texts cannot crowd the
-  others out of a batch. A text spooled during a database outage gets its row
-  when the drainer runs, so it can land behind a text that arrived after the
-  database came back; the Matrix timestamp is still the receive time.
+  others out of a batch. "Oldest" is by receive time, then row id, so a text
+  drained from the spool after a database outage is not delivered behind one
+  that arrived later. A text that was already delivered before the drainer ran
+  stays ahead of it; the Matrix timestamp is the receive time either way.
 - This needs bridgev2 to report real results, so the portal event buffer is
   switched off (`bridge.portal_event_buffer: 0`, mautrix-go 0.32), making
   `QueueRemoteEvent` synchronous. The bridge forces it to 0 at startup, and the
@@ -51,9 +52,9 @@ buffered, lost texts with no trace.
 ## Consequences
 
 - A Synapse outage, a bridge crash, or a database outage no longer loses
-  inbound texts, provided the spool is on persistent storage.
-- The spool needs a small persistent volume; on an emptyDir it protects
-  against a database outage but not a pod restart during one.
+  inbound texts, provided the spool survives the outage.
+- The spool is best on an `emptyDir`: it survives a container restart but not
+  deletion of the pod. A persistent volume also survives that and is optional.
 - Texts reach Matrix a little later than before (one database round trip and a
   worker wake-up) and, after an outage, in a burst.
 - A text whose login or portal can never be handled stays in the outbox and

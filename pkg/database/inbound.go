@@ -10,7 +10,7 @@ import (
 // InboundMessage is a text accepted from SIP that has not reached Matrix yet.
 // The json tags are the spool file format, so renaming one is a format change.
 type InboundMessage struct {
-	// ID orders delivery. It is assigned by the table and is zero until read
+	// ID breaks ties in delivery order. It is assigned by the table and is zero until read
 	// back, so it is not part of the spool format.
 	ID int64 `json:"-"`
 	// UID is minted when the text is accepted. It is the idempotency key for
@@ -48,12 +48,18 @@ const (
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (uid) DO NOTHING
 	`
-	// The oldest message of each portal: a portal with many stuck messages
-	// then cannot crowd the others out of the batch.
+	// The earliest-received message of each portal: a portal with many stuck
+	// messages cannot crowd the others out of the batch, and a text drained
+	// from the spool (higher id, earlier receive time) is not left behind a
+	// later one.
 	headInboundQuery = `
-		SELECT ` + inboundColumns + ` FROM sip_inbound_message
-		WHERE id IN (SELECT MIN(id) FROM sip_inbound_message GROUP BY login_id, portal_id)
-		ORDER BY id LIMIT $1
+		SELECT ` + inboundColumns + ` FROM sip_inbound_message m
+		WHERE NOT EXISTS (
+			SELECT 1 FROM sip_inbound_message o
+			WHERE o.login_id = m.login_id AND o.portal_id = m.portal_id
+			AND (o.received_at < m.received_at OR (o.received_at = m.received_at AND o.id < m.id))
+		)
+		ORDER BY received_at, id LIMIT $1
 	`
 	deleteInboundQuery = `DELETE FROM sip_inbound_message WHERE id = $1`
 	countInboundQuery  = `SELECT COUNT(*) FROM sip_inbound_message`
@@ -82,8 +88,8 @@ func (q *InboundQuery) Insert(ctx context.Context, m *InboundMessage) (bool, err
 	return n > 0, err
 }
 
-// Heads returns the oldest waiting message of each portal, up to limit, oldest
-// first. Delivering a head exposes the next message of its portal.
+// Heads returns the earliest-received waiting message of each portal, up to
+// limit, earliest first. Delivering a head exposes the next message of its portal.
 func (q *InboundQuery) Heads(ctx context.Context, limit int) ([]*InboundMessage, error) {
 	return q.QueryMany(ctx, headInboundQuery, limit)
 }

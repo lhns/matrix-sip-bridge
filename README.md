@@ -485,9 +485,9 @@ If the database cannot take the text within about 3 s, it is written to
 `messages.spool_dir` instead (one JSON file per text, fsynced and atomically
 renamed) and moved into the table when the database is back. With both failing,
 or with `spool_dir` empty and the database down, the SIP server gets a 500.
-Mount a small persistent volume (1 Gi is plenty) at `spool_dir`; on an emptyDir
-the spool does not survive a pod restart. A file the bridge cannot parse is
-renamed `*.bad` and left for you.
+Mount a small `emptyDir` at `spool_dir`: it survives a container restart but not
+deletion of the pod. A persistent volume is optional and also survives that.
+A file the bridge cannot parse is renamed `*.bad` and left for you.
 
 For this to hold the bridgev2 settings must make delivery synchronous and
 patient:
