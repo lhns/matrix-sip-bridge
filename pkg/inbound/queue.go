@@ -4,13 +4,15 @@
 // persisted before that answer: into the sip_inbound_message table, or, if the
 // database is unavailable, into a spool directory on local disk. A drainer
 // moves spool files into the table and a worker hands table rows to bridgev2,
-// deleting a row only once bridgev2 reports success. See ADR-0018.
+// one portal at a time, deleting a row only once bridgev2 reports success.
+// See ADR-0018.
 package inbound
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -23,7 +25,7 @@ import (
 // Store is the outbox table.
 type Store interface {
 	Insert(ctx context.Context, m *database.InboundMessage) (bool, error)
-	Pending(ctx context.Context, limit int) ([]*database.InboundMessage, error)
+	Heads(ctx context.Context, limit int) ([]*database.InboundMessage, error)
 	Delete(ctx context.Context, id int64) error
 	Count(ctx context.Context) (int, error)
 }
@@ -40,6 +42,7 @@ const (
 	defaultBackoffMin    = time.Second
 	defaultBackoffMax    = time.Minute
 	batchSize            = 500
+	maxParallel          = 8
 )
 
 // Queue is the durable path from SIP to bridgev2.
@@ -59,11 +62,15 @@ type Queue struct {
 	wake        chan struct{}
 	outboxDepth atomic.Int64
 	spoolDepth  atomic.Int64
-	// held is the per-portal retry state; only the delivery loop touches it.
-	held map[string]*portalState
+	// portals is the per-portal delivery state, guarded by mu.
+	mu      sync.Mutex
+	portals map[string]*portalState
+	sem     chan struct{} // bounds concurrent deliveries
+	wg      sync.WaitGroup
 }
 
 type portalState struct {
+	busy     bool // a delivery is in flight
 	failures int
 	retryAt  time.Time
 }
@@ -74,9 +81,10 @@ func New(store Store, spoolDir string, log zerolog.Logger, m *metrics.Recorder) 
 		store: store, log: log, metrics: m,
 		insertTimeout: defaultInsertTimeout, spoolInterval: defaultSpoolInterval, pollInterval: defaultPollInterval,
 		backoffMin: defaultBackoffMin, backoffMax: defaultBackoffMax,
-		now:  time.Now,
-		wake: make(chan struct{}, 1),
-		held: map[string]*portalState{},
+		now:     time.Now,
+		wake:    make(chan struct{}, 1),
+		portals: map[string]*portalState{},
+		sem:     make(chan struct{}, maxParallel),
 	}
 	if spoolDir != "" {
 		s, err := NewSpool(spoolDir)
@@ -131,8 +139,9 @@ func (q *Queue) Drain(ctx context.Context) error {
 			q.log.Error().Err(err).Str("file", name).Msg("Unreadable spool file, setting it aside")
 			if qErr := q.spool.Quarantine(name); qErr != nil {
 				q.log.Error().Err(qErr).Str("file", name).Msg("Failed to set the spool file aside")
+			} else {
+				q.setSpool(q.spoolDepth.Add(-1))
 			}
-			q.setSpool(q.spoolDepth.Add(-1))
 			continue
 		}
 		ictx, cancel := context.WithTimeout(ctx, q.insertTimeout)
@@ -155,76 +164,104 @@ func (q *Queue) Drain(ctx context.Context) error {
 	return nil
 }
 
-// DeliverPass makes one pass over the table and returns how long to wait
-// before the next: zero means go again now, negative means nothing is
-// scheduled and the next wake or poll is enough.
+// DeliverPass starts a delivery for the oldest waiting message of every portal
+// that is idle and not backing off, then returns without waiting for them, and
+// reports how long until the next backoff ends: negative means nothing is
+// scheduled and the next wake or poll is enough. Each delivery wakes the loop
+// when it ends.
 //
-// Order is kept per portal. A portal whose message fails is held back with
-// exponential backoff and its later messages are skipped, while other portals
-// carry on, so one stuck room does not stop the rest.
+// Order is kept per portal because only a portal's oldest message is ever in
+// flight. A QueueRemoteEvent can block for hours against an unreachable
+// homeserver, so deliveries run concurrently (at most maxParallel) and a stuck
+// portal holds back only itself. A portal whose message fails backs off
+// exponentially.
 func (q *Queue) DeliverPass(ctx context.Context, deliver DeliverFunc) time.Duration {
-	rows, err := q.store.Pending(ctx, batchSize)
+	heads, err := q.store.Heads(ctx, batchSize)
 	if err != nil {
 		q.log.Warn().Err(err).Msg("Failed to read the inbound outbox")
 		return q.backoffMin
 	}
-	if len(rows) < batchSize {
-		q.setOutbox(int64(len(rows)))
+	if n, err := q.store.Count(ctx); err == nil {
+		q.setOutbox(int64(n))
 	}
-	blocked := map[string]bool{}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	seen := map[string]bool{}
 	var soonest time.Time
-	note := func(t time.Time) {
-		if soonest.IsZero() || t.Before(soonest) {
-			soonest = t
-		}
-	}
-	for _, row := range rows {
+spawn:
+	for _, row := range heads {
 		if ctx.Err() != nil {
 			return -1
 		}
 		key := row.LoginID + "\x00" + row.PortalID
-		if blocked[key] {
-			continue
-		}
-		st := q.held[key]
-		if st != nil && q.now().Before(st.retryAt) {
-			blocked[key] = true
-			note(st.retryAt)
-			continue
-		}
-		err := deliver(ctx, row)
-		if err == nil {
-			if err = q.store.Delete(ctx, row.ID); err == nil {
-				delete(q.held, key)
-				q.setOutbox(q.outboxDepth.Add(-1))
-				continue
-			}
-			err = fmt.Errorf("delete delivered message: %w", err)
-		}
+		seen[key] = true
+		st := q.portals[key]
 		if st == nil {
 			st = &portalState{}
-			q.held[key] = st
+			q.portals[key] = st
 		}
+		if st.busy {
+			continue
+		}
+		if q.now().Before(st.retryAt) {
+			if soonest.IsZero() || st.retryAt.Before(soonest) {
+				soonest = st.retryAt
+			}
+			continue
+		}
+		select {
+		case q.sem <- struct{}{}:
+		default:
+			break spawn // a finishing delivery wakes the loop
+		}
+		st.busy = true
+		q.wg.Add(1)
+		go q.deliverOne(ctx, deliver, key, row)
+	}
+	for key, st := range q.portals {
+		if !seen[key] && !st.busy {
+			delete(q.portals, key)
+		}
+	}
+	if soonest.IsZero() {
+		return -1
+	}
+	return max(soonest.Sub(q.now()), 0)
+}
+
+// deliverOne hands one message over and deletes its row on success.
+func (q *Queue) deliverOne(ctx context.Context, deliver DeliverFunc, key string, row *database.InboundMessage) {
+	defer q.wg.Done()
+	defer func() { <-q.sem }()
+	defer q.notify()
+	err := deliver(ctx, row)
+	if err == nil {
+		if err = q.store.Delete(ctx, row.ID); err == nil {
+			q.setOutbox(q.outboxDepth.Add(-1))
+			q.mu.Lock()
+			delete(q.portals, key)
+			q.mu.Unlock()
+			return
+		}
+		err = fmt.Errorf("delete delivered message: %w", err)
+	}
+	q.mu.Lock()
+	st := q.portals[key]
+	st.busy = false
+	if ctx.Err() == nil {
 		st.failures++
 		st.retryAt = q.now().Add(q.backoff(st.failures))
-		blocked[key] = true
-		note(st.retryAt)
-		q.log.Warn().Err(err).Int64("outbox_id", row.ID).Int("failures", st.failures).
+	}
+	failures := st.failures
+	q.mu.Unlock()
+	if ctx.Err() == nil {
+		q.log.Warn().Err(err).Int64("outbox_id", row.ID).Int("failures", failures).
 			Msg("Failed to deliver inbound message, will retry")
 	}
-	for key := range q.held {
-		if !blocked[key] {
-			delete(q.held, key)
-		}
-	}
-	if !soonest.IsZero() {
-		return max(soonest.Sub(q.now()), 0)
-	}
-	if len(rows) == batchSize {
-		return 0
-	}
-	return -1
 }
+
+// Wait blocks until the deliveries DeliverPass started have ended; for tests.
+func (q *Queue) Wait() { q.wg.Wait() }
 
 func (q *Queue) backoff(failures int) time.Duration {
 	d := q.backoffMin

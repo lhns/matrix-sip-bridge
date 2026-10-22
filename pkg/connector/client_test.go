@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -263,8 +265,11 @@ func TestInboundMessageIsDeliveredToTheRecipientsOwnPortal(t *testing.T) {
 	br, sc := newTestBridge(t, bridgeconfigWith(testOwner, "@bob:example.com"))
 	sc.metrics = metrics.New(prometheus.NewRegistry())
 	br.DB.KV.Set(context.Background(), keyDefaultRecipient, string(testOwner))
+	var mu sync.Mutex
 	var got []*queuedEvent
 	sc.queueEvent = func(login *bridgev2.UserLogin, evt bridgev2.RemoteEvent) bridgev2.EventHandlingResult {
+		mu.Lock()
+		defer mu.Unlock()
 		got = append(got, &queuedEvent{login: login.ID, key: evt.GetPortalKey()})
 		return bridgev2.EventHandlingResultSuccess
 	}
@@ -278,7 +283,13 @@ func TestInboundMessageIsDeliveredToTheRecipientsOwnPortal(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("%d events queued before delivery, want 0", len(got))
 	}
-	sc.inbound.DeliverPass(context.Background(), sc.deliverInbound)
+	// A portal's next text is delivered by the pass after its previous one.
+	for range 2 {
+		sc.inbound.DeliverPass(context.Background(), sc.deliverInbound)
+		sc.inbound.Wait()
+	}
+	// The portals are separate, so their deliveries may finish in any order.
+	slices.SortStableFunc(got, func(a, b *queuedEvent) int { return strings.Compare(string(b.login), string(a.login)) })
 	want := []networkid.UserLoginID{"@bob:example.com", "@alice:example.com", "@alice:example.com"}
 	if len(got) != len(want) {
 		t.Fatalf("queued %d events, want %d", len(got), len(want))

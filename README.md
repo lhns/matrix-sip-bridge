@@ -477,9 +477,9 @@ Three things worth knowing before wiring up a Deployment:
 A text is stored before the SIP server is answered 200, because SIP cannot
 redeliver one the bridge has accepted ([ADR-0018](docs/adr/0018-inbound-texts-are-persisted-before-the-sip-answer.md)).
 It goes into the table `sip_inbound_message`; a worker hands rows to Matrix in
-order per portal and deletes a row only when bridgev2 reports success, retrying
-with a backoff of 1 s doubling to 1 min. A text for a portal that keeps failing
-holds back only that portal.
+order per portal (up to 8 portals at once) and deletes a row only when bridgev2
+reports success, retrying with a backoff of 1 s doubling to 1 min. A text for a
+portal that keeps failing, or whose delivery blocks, holds back only that portal.
 
 If the database cannot take the text within about 3 s, it is written to
 `messages.spool_dir` instead (one JSON file per text, fsynced and atomically

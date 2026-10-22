@@ -48,8 +48,12 @@ const (
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (uid) DO NOTHING
 	`
-	pendingInboundQuery = `
-		SELECT ` + inboundColumns + ` FROM sip_inbound_message ORDER BY id LIMIT $1
+	// The oldest message of each portal: a portal with many stuck messages
+	// then cannot crowd the others out of the batch.
+	headInboundQuery = `
+		SELECT ` + inboundColumns + ` FROM sip_inbound_message
+		WHERE id IN (SELECT MIN(id) FROM sip_inbound_message GROUP BY login_id, portal_id)
+		ORDER BY id LIMIT $1
 	`
 	deleteInboundQuery = `DELETE FROM sip_inbound_message WHERE id = $1`
 	countInboundQuery  = `SELECT COUNT(*) FROM sip_inbound_message`
@@ -78,9 +82,10 @@ func (q *InboundQuery) Insert(ctx context.Context, m *InboundMessage) (bool, err
 	return n > 0, err
 }
 
-// Pending returns up to limit messages in delivery order.
-func (q *InboundQuery) Pending(ctx context.Context, limit int) ([]*InboundMessage, error) {
-	return q.QueryMany(ctx, pendingInboundQuery, limit)
+// Heads returns the oldest waiting message of each portal, up to limit, oldest
+// first. Delivering a head exposes the next message of its portal.
+func (q *InboundQuery) Heads(ctx context.Context, limit int) ([]*InboundMessage, error) {
+	return q.QueryMany(ctx, headInboundQuery, limit)
 }
 
 // Delete removes a delivered message.

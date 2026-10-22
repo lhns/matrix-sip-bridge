@@ -44,7 +44,7 @@ func TestInboundMessageIsStoredBeforeItIsAnswered(t *testing.T) {
 	if err := sc.handleInboundMessage(context.Background(), inboundSMS()); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := sc.db.Inbound.Pending(context.Background(), 10)
+	rows, err := sc.db.Inbound.Heads(context.Background(), 10)
 	if err != nil || len(rows) != 1 || rows[0].Body != "hi" || rows[0].PortalID != "home-+15551234567" || rows[0].Sender != "+15551234567" {
 		t.Fatalf("outbox = %+v, %v; want the one text", rows, err)
 	}
@@ -129,6 +129,7 @@ func TestDeliveryDeletesOnSuccessAndKeepsAStableMessageID(t *testing.T) {
 	sc.inbound.SetBackoff(time.Nanosecond, time.Nanosecond)
 	for i := range 4 {
 		sc.inbound.DeliverPass(context.Background(), sc.deliverInbound)
+		sc.inbound.Wait()
 		want := 1
 		if i == 3 {
 			want = 0

@@ -3,6 +3,7 @@ package inbound
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,13 +44,21 @@ func (s *memStore) Insert(_ context.Context, m *database.InboundMessage) (bool, 
 	return true, nil
 }
 
-func (s *memStore) Pending(_ context.Context, limit int) ([]*database.InboundMessage, error) {
+func (s *memStore) Heads(_ context.Context, limit int) ([]*database.InboundMessage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.down {
 		return nil, errDown
 	}
-	return append([]*database.InboundMessage(nil), s.rows[:min(limit, len(s.rows))]...), nil
+	var out []*database.InboundMessage
+	seen := map[string]bool{}
+	for _, r := range s.rows {
+		if key := r.LoginID + r.PortalID; !seen[key] && len(out) < limit {
+			seen[key] = true
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 func (s *memStore) Delete(_ context.Context, id int64) error {
@@ -277,6 +286,14 @@ func (f *fakeDeliver) fn(_ context.Context, m *database.InboundMessage) error {
 	return nil
 }
 
+// settle runs passes until the outbox stops changing or only backoffs remain.
+func settle(q *Queue, deliver DeliverFunc) {
+	for range 20 {
+		q.DeliverPass(context.Background(), deliver)
+		q.Wait()
+	}
+}
+
 func TestWorkerDeletesRowsOnlyOnSuccess(t *testing.T) {
 	store := &memStore{}
 	q := newQueue(t, store, "")
@@ -289,28 +306,24 @@ func TestWorkerDeletesRowsOnlyOnSuccess(t *testing.T) {
 	}
 	f := &fakeDeliver{failing: map[string]bool{"p": true}}
 
-	wait := q.DeliverPass(context.Background(), f.fn)
+	q.DeliverPass(context.Background(), f.fn)
+	q.Wait()
 	if got := store.uids(); len(got) != 2 {
 		t.Fatalf("rows after a failed delivery = %v, want both kept", got)
 	}
-	if wait != q.backoffMin {
+	if wait := q.DeliverPass(context.Background(), f.fn); wait != q.backoffMin {
 		t.Errorf("wait = %v, want the first backoff %v", wait, q.backoffMin)
 	}
+	q.Wait()
 	if len(f.attempts) != 1 {
-		t.Errorf("attempts = %v, want one: b must wait behind a", f.attempts)
-	}
-
-	// Before the backoff expires nothing is retried.
-	q.DeliverPass(context.Background(), f.fn)
-	if len(f.attempts) != 1 {
-		t.Errorf("attempts = %v, want no retry before the backoff expires", f.attempts)
+		t.Errorf("attempts = %v, want one: b must wait behind a, and a is backing off", f.attempts)
 	}
 
 	// Recovery: after the backoff the same row is retried, then its successor,
 	// each deleted on success and in order.
 	f.failing["p"] = false
 	now = now.Add(2 * time.Second)
-	q.DeliverPass(context.Background(), f.fn)
+	settle(q, f.fn)
 	if strings.Join(f.delivered, ",") != "a,b" {
 		t.Errorf("delivered = %v, want a,b in order", f.delivered)
 	}
@@ -338,15 +351,70 @@ func TestWorkerDoesNotLetOnePortalBlockOthers(t *testing.T) {
 		}
 	}
 	f := &fakeDeliver{failing: map[string]bool{"stuck": true}}
-	q.DeliverPass(context.Background(), f.fn)
+	settle(q, f.fn)
 	if strings.Join(f.delivered, ",") != "b1,b2" {
 		t.Errorf("delivered = %v, want b1,b2", f.delivered)
 	}
-	if strings.Join(f.attempts, ",") != "a1,b1,b2" {
+	if n := strings.Count(strings.Join(f.attempts, ","), "a"); n != 1 {
 		t.Errorf("attempts = %v, want a1 tried once and a2 never ahead of it", f.attempts)
 	}
 	if got := strings.Join(store.uids(), ","); got != "a1,a2" {
 		t.Errorf("rows = %s, want a1,a2 kept", got)
+	}
+}
+
+// A delivery that blocks (QueueRemoteEvent against a down homeserver) must not
+// hold up other portals, and must not be started twice.
+func TestWorkerDeliversOtherPortalsWhileOneIsBlocked(t *testing.T) {
+	store := &memStore{}
+	q := newQueue(t, store, "")
+	for _, m := range []*database.InboundMessage{msg("a1", "slow", 1), msg("b1", "fast", 2)} {
+		if _, err := q.Persist(context.Background(), m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	release := make(chan struct{})
+	started := make(chan string, 4)
+	deliver := func(_ context.Context, m *database.InboundMessage) error {
+		started <- m.UID
+		if m.PortalID == "slow" {
+			<-release
+		}
+		return nil
+	}
+	for range 3 {
+		q.DeliverPass(context.Background(), deliver)
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := strings.Join(store.uids(), ","); got != "a1" {
+		t.Errorf("rows while slow is blocked = %s, want only a1", got)
+	}
+	if len(started) != 2 {
+		t.Errorf("%d deliveries started, want 2 (a1 once, b1 once)", len(started))
+	}
+	close(release)
+	q.Wait()
+	if got := store.uids(); len(got) != 0 {
+		t.Errorf("rows after release = %v, want none", got)
+	}
+}
+
+// One portal with more stuck messages than a batch must not hide the others.
+func TestWorkerIsNotStarvedByAPortalWithManyMessages(t *testing.T) {
+	store := &memStore{}
+	q := newQueue(t, store, "")
+	for i := range batchSize + 10 {
+		if _, err := q.Persist(context.Background(), msg(fmt.Sprintf("s%d", i), "stuck", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := q.Persist(context.Background(), msg("late", "fine", 9999)); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeDeliver{failing: map[string]bool{"stuck": true}}
+	settle(q, f.fn)
+	if strings.Join(f.delivered, ",") != "late" {
+		t.Errorf("delivered = %v, want late", f.delivered)
 	}
 }
 
