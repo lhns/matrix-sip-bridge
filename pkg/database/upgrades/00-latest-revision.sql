@@ -1,4 +1,4 @@
--- v0 -> v2 (compatible with v1+): Latest revision
+-- v0 -> v3 (compatible with v1+): Latest revision
 
 CREATE TABLE sip_call (
     call_id        TEXT   NOT NULL,
@@ -26,3 +26,29 @@ CREATE INDEX sip_call_room_idx ON sip_call (room_id, state);
 -- An inbound INVITE names the conference, not the call, so it is resolved back
 -- to a call through this index.
 CREATE INDEX sip_call_conference_idx ON sip_call (conference);
+
+-- Inbound texts accepted from SIP and not yet in Matrix. See pkg/inbound.
+-- only: postgres for next 11 lines
+CREATE TABLE sip_inbound_message (
+    id          BIGSERIAL PRIMARY KEY,
+    uid         TEXT   NOT NULL UNIQUE,
+    login_id    TEXT   NOT NULL,
+    portal_id   TEXT   NOT NULL,
+    sender      TEXT   NOT NULL,
+    recipient   TEXT   NOT NULL DEFAULT '',
+    body        TEXT   NOT NULL,
+    line        TEXT   NOT NULL DEFAULT '',
+    received_at BIGINT NOT NULL
+);
+-- only: sqlite for next 11 lines
+CREATE TABLE sip_inbound_message (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid         TEXT    NOT NULL UNIQUE,
+    login_id    TEXT    NOT NULL,
+    portal_id   TEXT    NOT NULL,
+    sender      TEXT    NOT NULL,
+    recipient   TEXT    NOT NULL DEFAULT '',
+    body        TEXT    NOT NULL,
+    line        TEXT    NOT NULL DEFAULT '',
+    received_at BIGINT  NOT NULL
+);

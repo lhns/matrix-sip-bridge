@@ -1,4 +1,4 @@
-// Package database holds the bridge's own tables, which track in-flight calls.
+// Package database holds the bridge's own tables: in-flight calls and the inbound text outbox.
 //
 // bridgev2 owns the main dbutil.UpgradeTable and its version row, so these
 // tables live in a child database with a version table of their own. Sharing
@@ -20,7 +20,8 @@ const versionTable = "sip_bridge_version"
 // Database is the bridge's own schema.
 type Database struct {
 	*dbutil.Database
-	Call *CallQuery
+	Call    *CallQuery
+	Inbound *InboundQuery
 }
 
 // New wraps a bridgev2 database in a child that owns the sip_* tables.
@@ -34,6 +35,7 @@ func New(db *dbutil.Database, log zerolog.Logger) *Database {
 	return &Database{
 		Database: child,
 		Call:     &CallQuery{dbutil.MakeQueryHelper(child, newCall)},
+		Inbound:  &InboundQuery{dbutil.MakeQueryHelper(child, newInboundMessage)},
 	}
 }
 

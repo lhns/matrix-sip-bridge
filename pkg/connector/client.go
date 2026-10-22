@@ -2,12 +2,14 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/emiago/sipgo/sip"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/ptr"
 	"maunium.net/go/mautrix/bridgev2"
@@ -18,6 +20,7 @@ import (
 	"maunium.net/go/mautrix/id"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/calls"
+	sipdb "github.com/lhns/matrix-sip-bridge/pkg/database"
 	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
 	"github.com/lhns/matrix-sip-bridge/pkg/phonenum"
 	"github.com/lhns/matrix-sip-bridge/pkg/siptransport"
@@ -505,33 +508,81 @@ func (sc *SIPConnector) handleInboundMessage(ctx context.Context, in siptranspor
 		sc.metrics.Message(metrics.DirectionInbound, metrics.MessageDroppedBadSender)
 		return nil
 	}
-	sc.enqueue(login, &simplevent.Message[*inboundMessage]{
+	rec := &sipdb.InboundMessage{
+		UID:        uuid.NewString(),
+		LoginID:    string(login.ID),
+		PortalID:   portalID,
+		Sender:     msg.From,
+		Recipient:  msg.To,
+		Body:       msg.Body,
+		Line:       msg.Line,
+		ReceivedAt: time.Now(),
+	}
+	// The 200 this returns is the last word the SIP server gets: it cannot
+	// redeliver, so the text must be on disk before it. Delivery to Matrix is
+	// the inbound queue's job from here; see ADR-0018.
+	spooled, err := sc.inbound.Persist(ctx, rec)
+	if err != nil {
+		log.Err(err).Msg("Failed to persist an inbound message, refusing it")
+		sc.metrics.Message(metrics.DirectionInbound, metrics.MessagePersistFailed)
+		return err
+	}
+	if spooled {
+		sc.metrics.Message(metrics.DirectionInbound, metrics.MessageSpooled)
+	} else {
+		sc.metrics.Message(metrics.DirectionInbound, metrics.MessageBridged)
+	}
+	return nil
+}
+
+// deliverInbound hands a persisted text to bridgev2. It succeeds only when
+// bridgev2 reports success; the outbox row is deleted on that and on nothing
+// else.
+func (sc *SIPConnector) deliverInbound(ctx context.Context, m *sipdb.InboundMessage) error {
+	login, err := sc.br.GetExistingUserLoginByID(ctx, networkid.UserLoginID(m.LoginID))
+	if err != nil {
+		return fmt.Errorf("look up login %s: %w", m.LoginID, err)
+	}
+	if login == nil {
+		return fmt.Errorf("login %s does not exist", m.LoginID)
+	}
+	msg := &inboundMessage{From: m.Sender, To: m.Recipient, Body: m.Body, Line: m.Line}
+	res := sc.enqueue(login, &simplevent.Message[*inboundMessage]{
 		EventMeta: simplevent.EventMeta{
 			Type: bridgev2.RemoteEventMessage,
 			LogContext: func(c zerolog.Context) zerolog.Context {
 				return c.Str("from", msg.From)
 			},
-			PortalKey:    networkid.PortalKey{ID: networkid.PortalID(portalID), Receiver: login.ID},
+			PortalKey:    networkid.PortalKey{ID: networkid.PortalID(m.PortalID), Receiver: login.ID},
 			CreatePortal: true,
-			Sender:       bridgev2.EventSender{Sender: networkid.UserID(portalID)},
-			Timestamp:    time.Now(),
+			Sender:       bridgev2.EventSender{Sender: networkid.UserID(m.PortalID)},
+			Timestamp:    m.ReceivedAt,
 		},
 		Data: msg,
-		// SIP MESSAGE has no message ID the far end would reuse, so the
-		// timestamp is the only thing available to deduplicate on.
-		ID:                 networkid.MessageID(fmt.Sprintf("in-%s-%d", portalID, time.Now().UnixNano())),
+		// Stable across retries, so bridgev2's duplicate check absorbs a
+		// message that reached Matrix but whose row was not deleted.
+		ID:                 networkid.MessageID("in-" + m.UID),
 		ConvertMessageFunc: convertInboundMessage,
 	})
-	sc.metrics.Message(metrics.DirectionInbound, metrics.MessageBridged)
+	// Queued means an in-memory buffer took it, which a crash loses: the same
+	// failure this queue exists to prevent, so it is never a success here.
+	if res.Queued {
+		return errors.New("bridgev2 queued the event instead of handling it; bridge.portal_event_buffer must be 0")
+	}
+	if !res.Success {
+		if res.Error != nil {
+			return res.Error
+		}
+		return errors.New("bridgev2 did not handle the message")
+	}
 	return nil
 }
 
-func (sc *SIPConnector) enqueue(login *bridgev2.UserLogin, evt bridgev2.RemoteEvent) {
+func (sc *SIPConnector) enqueue(login *bridgev2.UserLogin, evt bridgev2.RemoteEvent) bridgev2.EventHandlingResult {
 	if sc.queueEvent != nil {
-		sc.queueEvent(login, evt)
-		return
+		return sc.queueEvent(login, evt)
 	}
-	sc.br.QueueRemoteEvent(login, evt)
+	return sc.br.QueueRemoteEvent(login, evt)
 }
 
 func convertInboundMessage(_ context.Context, _ *bridgev2.Portal, _ bridgev2.MatrixAPI, data *inboundMessage) (*bridgev2.ConvertedMessage, error) {

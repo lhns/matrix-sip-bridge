@@ -21,6 +21,8 @@ import (
 	"maunium.net/go/mautrix/id"
 
 	"github.com/lhns/matrix-sip-bridge/pkg/calls"
+	sipdb "github.com/lhns/matrix-sip-bridge/pkg/database"
+	"github.com/lhns/matrix-sip-bridge/pkg/inbound"
 )
 
 // stubMatrix is the Matrix connector reduced to what NewBridge, a login, a
@@ -95,6 +97,13 @@ func newTestBridge(t *testing.T, permissions bridgeconfig.PermissionConfig) (*br
 	br.BackgroundCtx = context.Background()
 	if err := br.DB.Upgrade(context.Background()); err != nil {
 		t.Fatalf("upgrade: %v", err)
+	}
+	sc.db = sipdb.New(raw, zerolog.Nop())
+	if err := sc.db.Upgrade(context.Background()); err != nil {
+		t.Fatalf("upgrade sip schema: %v", err)
+	}
+	if sc.inbound, err = inbound.New(sc.db.Inbound, "", zerolog.Nop(), nil); err != nil {
+		t.Fatalf("inbound queue: %v", err)
 	}
 	var fk int
 	if err := raw.QueryRow(context.Background(), "PRAGMA foreign_keys").Scan(&fk); err != nil || fk != 1 {

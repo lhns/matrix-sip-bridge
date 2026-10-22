@@ -264,8 +264,9 @@ func TestInboundMessageIsDeliveredToTheRecipientsOwnPortal(t *testing.T) {
 	sc.metrics = metrics.New(prometheus.NewRegistry())
 	br.DB.KV.Set(context.Background(), keyDefaultRecipient, string(testOwner))
 	var got []*queuedEvent
-	sc.queueEvent = func(login *bridgev2.UserLogin, evt bridgev2.RemoteEvent) {
+	sc.queueEvent = func(login *bridgev2.UserLogin, evt bridgev2.RemoteEvent) bridgev2.EventHandlingResult {
 		got = append(got, &queuedEvent{login: login.ID, key: evt.GetPortalKey()})
+		return bridgev2.EventHandlingResultSuccess
 	}
 	for _, recipient := range []string{"@bob:example.com", "@alice:example.com", ""} {
 		in := siptransport.InboundMessage{From: "sip:+15551234567@home", Body: "hi", Recipient: recipient}
@@ -273,6 +274,11 @@ func TestInboundMessageIsDeliveredToTheRecipientsOwnPortal(t *testing.T) {
 			t.Fatalf("recipient %q: %v", recipient, err)
 		}
 	}
+	// Accepting a text only stores it; the worker's pass delivers it.
+	if len(got) != 0 {
+		t.Fatalf("%d events queued before delivery, want 0", len(got))
+	}
+	sc.inbound.DeliverPass(context.Background(), sc.deliverInbound)
 	want := []networkid.UserLoginID{"@bob:example.com", "@alice:example.com", "@alice:example.com"}
 	if len(got) != len(want) {
 		t.Fatalf("queued %d events, want %d", len(got), len(want))

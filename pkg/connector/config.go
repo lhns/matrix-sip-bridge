@@ -45,6 +45,10 @@ type MessageConfig struct {
 	OutboundFrom string `yaml:"outbound_from"`
 	// MaxLength is advertised to Matrix clients as the room's text limit.
 	MaxLength int `yaml:"max_length"`
+	// SpoolDir is where an inbound text is written when the database cannot
+	// take it. Empty disables the spool: with the database down the text is
+	// then refused (SIP 500). Must be on persistent storage to mean anything.
+	SpoolDir string `yaml:"spool_dir"`
 }
 
 // LoginFlowID is the ID of the only login flow.
@@ -75,6 +79,7 @@ func upgradeConfig(helper configupgrade.Helper) {
 	helper.Copy(configupgrade.Str, "messages", "outbound_to")
 	helper.Copy(configupgrade.Str, "messages", "outbound_from")
 	helper.Copy(configupgrade.Int, "messages", "max_length")
+	helper.Copy(configupgrade.Str, "messages", "spool_dir")
 
 	helper.Copy(configupgrade.Bool, "calls", "enabled")
 	helper.Copy(configupgrade.Str, "calls", "conference_prefix")

@@ -258,7 +258,10 @@ func TestResyncOnlyTouchesTheLoginsOwnPortals(t *testing.T) {
 		}
 	}
 	var keys []networkid.PortalKey
-	sc.queueEvent = func(_ *bridgev2.UserLogin, evt bridgev2.RemoteEvent) { keys = append(keys, evt.GetPortalKey()) }
+	sc.queueEvent = func(_ *bridgev2.UserLogin, evt bridgev2.RemoteEvent) bridgev2.EventHandlingResult {
+		keys = append(keys, evt.GetPortalKey())
+		return bridgev2.EventHandlingResultSuccess
+	}
 
 	alice.Client.(*SIPClient).resyncPortals(ctx)
 

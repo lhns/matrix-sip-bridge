@@ -17,6 +17,7 @@ import (
 
 	"github.com/lhns/matrix-sip-bridge/pkg/calls"
 	sipdb "github.com/lhns/matrix-sip-bridge/pkg/database"
+	"github.com/lhns/matrix-sip-bridge/pkg/inbound"
 	"github.com/lhns/matrix-sip-bridge/pkg/metrics"
 	"github.com/lhns/matrix-sip-bridge/pkg/siptransport"
 )
@@ -25,14 +26,16 @@ import (
 type SIPConnector struct {
 	Config Config
 
-	br     *bridgev2.Bridge
-	sip    *siptransport.Transport
-	calls  *calls.Subsystem
-	db     *sipdb.Database
-	logins *loginResolver
+	br    *bridgev2.Bridge
+	sip   *siptransport.Transport
+	calls *calls.Subsystem
+	db    *sipdb.Database
+	// inbound is the durable path from an accepted SIP text to bridgev2.
+	inbound *inbound.Queue
+	logins  *loginResolver
 	// queueEvent is br.QueueRemoteEvent; tests replace it to see what would
 	// reach a portal without running one.
-	queueEvent func(*bridgev2.UserLogin, bridgev2.RemoteEvent)
+	queueEvent func(*bridgev2.UserLogin, bridgev2.RemoteEvent) bridgev2.EventHandlingResult
 	health     *callHealth
 	metrics    *metrics.Recorder
 
@@ -65,6 +68,14 @@ func (sc *SIPConnector) Init(bridge *bridgev2.Bridge) {
 	bridge.Commands.(*commands.Processor).AddHandlers(sc.dialCommand())
 	reg := metrics.NewRegistry()
 	sc.metrics = metrics.New(reg)
+	// Inbound delivery needs QueueRemoteEvent to return the real result, which
+	// a portal event buffer would replace with "queued". Init runs before any
+	// portal is loaded, so this takes effect for all of them.
+	if bridge.Config.PortalEventBuffer != 0 {
+		bridge.Log.Warn().Int("portal_event_buffer", bridge.Config.PortalEventBuffer).
+			Msg("bridge.portal_event_buffer must be 0 for durable inbound texts, overriding it")
+		bridge.Config.PortalEventBuffer = 0
+	}
 	// Init is the last point before the appservice HTTP server starts serving.
 	if mx, ok := bridge.Matrix.(*matrix.Connector); ok {
 		sc.registerReadiness(mx.AS)
@@ -111,6 +122,19 @@ func (sc *SIPConnector) Start(ctx context.Context) error {
 		cancel()
 		return err
 	}
+	// calls.Start upgrades the same schema only when calls are enabled, and a
+	// messages-only deployment needs the outbox table too. Before the SIP
+	// endpoint listens, so the first text finds the queue there.
+	if err := sc.db.Upgrade(ctx); err != nil {
+		cancel()
+		return fmt.Errorf("upgrade tables: %w", err)
+	}
+	q, err := inbound.New(sc.db.Inbound, sc.Config.Messages.SpoolDir, sc.br.Log.With().Str("component", "inbound").Logger(), sc.metrics)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("inbound queue: %w", err)
+	}
+	sc.inbound = q
 
 	// Handlers must be registered before the endpoint starts listening, or an
 	// INVITE that arrives immediately is answered 503.
@@ -128,6 +152,7 @@ func (sc *SIPConnector) Start(ctx context.Context) error {
 		}
 	}()
 	go sc.calls.Run(runCtx)
+	go sc.inbound.Run(runCtx, sc.deliverInbound)
 	go sc.watchSIPHealth(runCtx)
 	return nil
 }

@@ -251,6 +251,7 @@ send one that would not.
   E.164; a `From` it cannot read as a number is logged and dropped, because a
   portal keyed on a malformed identifier could never be replied to. The body is
   the message text, raw — not base64, and not carried in a custom header.
+  The 200 means the text is stored; see [Durable inbound texts](#durable-inbound-texts).
 - The `From` **host** is the line, put there in place of the carrier's own
   host — `sip:+15551234567@home`. It is what keeps a text and a call from the
   same person in one portal, since a MESSAGE has no conference header. A host
@@ -471,6 +472,45 @@ Three things worth knowing before wiring up a Deployment:
 - Only strings, booleans and numbers are supported, and a duration field reaches
   Go as an integer of **nanoseconds**. Set durations in the config file.
 
+### Durable inbound texts
+
+A text is stored before the SIP server is answered 200, because SIP cannot
+redeliver one the bridge has accepted ([ADR-0018](docs/adr/0018-inbound-texts-are-persisted-before-the-sip-answer.md)).
+It goes into the table `sip_inbound_message`; a worker hands rows to Matrix in
+order per portal and deletes a row only when bridgev2 reports success, retrying
+with a backoff of 1 s doubling to 1 min. A text for a portal that keeps failing
+holds back only that portal.
+
+If the database cannot take the text within about 3 s, it is written to
+`messages.spool_dir` instead (one JSON file per text, fsynced and atomically
+renamed) and moved into the table when the database is back. With both failing,
+or with `spool_dir` empty and the database down, the SIP server gets a 500.
+Mount a small persistent volume (1 Gi is plenty) at `spool_dir`; on an emptyDir
+the spool does not survive a pod restart. A file the bridge cannot parse is
+renamed `*.bad` and left for you.
+
+For this to hold the bridgev2 settings must make delivery synchronous and
+patient:
+
+```yaml
+bridge:
+    portal_event_buffer: 0   # QueueRemoteEvent returns the real result
+    send_reconnect_wait: 1m
+homeserver:
+    retry_limit: 150         # about 24 h of retries against an unreachable homeserver
+```
+
+The bridge forces `portal_event_buffer` to 0 itself (with a warning) because a
+buffered `QueueRemoteEvent` only reports "queued"; the other two are yours to
+set. The environment also needs `MAUTRIX_EVENT_HANDLING_TIMEOUT_TICKS=8640`: bridgev2
+otherwise assumes an event succeeded after 10 x 30 s and the worker would delete
+the row. Never set `MAUTRIX_PANIC_ON_STUCK_EVENT`. The old
+`MAUTRIX_PORTAL_EVENT_BUFFER` variable is no longer read.
+
+`sip_bridge_inbound_outbox_depth` and `sip_bridge_inbound_spool_depth` (see
+Metrics) should sit at zero; a depth that stays up means Matrix or the database
+is unreachable, or a text cannot be delivered.
+
 ### Startup and readiness
 
 The bridge starts in a fixed order: the database, then the Matrix connector,
@@ -513,7 +553,7 @@ a crash left behind therefore never blocks answering a call to the same number.
 
 `GET /metrics` is served on the **appservice** port too, beside the readiness
 endpoint, so scraping needs no second container port and no Service entry. It
-is always on and has no config key. Six families, all present at zero from
+is always on and has no config key. Eight families, all present at zero from
 startup so that "did this stop?" can be asked of any of them:
 
 | metric | type | labels |
@@ -524,6 +564,7 @@ startup so that "did this stop?" can be asked of any of them:
 | `sip_bridge_trunk_reconcile_total` | counter | `result` |
 | `sip_bridge_messages_total` | counter | `direction`, `outcome` |
 | `sip_bridge_start_timestamp_seconds`, `sip_bridge_sip_listen_timestamp_seconds` | gauges | — |
+| `sip_bridge_inbound_outbox_depth`, `sip_bridge_inbound_spool_depth` | gauges | — |
 
 `messages_total` is where the silent failures become countable: an inbound
 message whose `From` will not parse is answered 200 and dropped, and a trunk
@@ -685,6 +726,7 @@ pkg/callaudit/             livekit-sip `call statistics` -> did audio move both 
 pkg/metrics/               the Prometheus collectors and the cardinality rule
 pkg/phonenum/              E.164 normalisation and portal-ID round trips
 pkg/database/              db.Child() tables for call state, separate from bridgev2
+pkg/inbound/               the durable inbound text queue: outbox worker, spool, drainer
 docs/adr/                  architecture decision records
 ```
 

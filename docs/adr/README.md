@@ -19,3 +19,4 @@
 | [0015](0015-audio-is-verified-from-livekit-sip-call-statistics.md) | Audio is verified from livekit-sip's call statistics, not from the bridge | Accepted |
 | [0016](0016-per-user-logins-and-portals.md) | Per-user logins and portals | Amended by 0017 |
 | [0017](0017-line-members-and-dial-rooms.md) | Line members get a line's rooms, and a dial room to open more | Accepted |
+| [0018](0018-inbound-texts-are-persisted-before-the-sip-answer.md) | Inbound texts are persisted before the SIP answer | Accepted |
