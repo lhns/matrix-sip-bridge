@@ -5,16 +5,19 @@ Keep a Changelog, and this project adheres to
 Semantic Versioning.
 
 ## [Unreleased]
+
+## [0.3.0] - 2026-10-22
 ### Added
 - Durable inbound texts: a text is stored in the bridge's database (table `sip_inbound_message`) before the SIP server is answered 200, then delivered to Matrix by a background worker that retries until bridgev2 reports success. A Synapse outage or a bridge restart no longer loses texts. See [ADR-0018](https://github.com/lhns/matrix-sip-bridge/blob/main/docs/adr/0018-inbound-texts-are-persisted-before-the-sip-answer.md).
 - `messages.spool_dir`: a local backup queue. When the database cannot take a text it is written there, one file each, and moved into the database once it is back. Empty disables it, and the text is then refused (SIP 500) while the database is down.
 - Metrics `sip_bridge_inbound_outbox_depth` and `sip_bridge_inbound_spool_depth`, and inbound `messages_total` outcomes `spooled` and `persist_failed`.
 
 ### Changed
+- The image runs on `gcr.io/distroless/static-debian13:nonroot` (was debian12), whose CA bundle drops the compromised eMudhra root, and is built with Go 1.26.10 or newer.
 - mautrix-go is updated to v0.32.0. `bridge.portal_event_buffer` is now a config key.
 - `messages_total{inbound,bridged}` now counts a text stored for delivery, not one handed to Matrix.
 
-**Upgrading:** the upgrade adds a table and needs nothing else, but without the settings below a homeserver outage can still drop texts. Set `bridge.portal_event_buffer: 0`, `homeserver.retry_limit: 150` and `bridge.send_reconnect_wait: 1m`, the environment variable `MAUTRIX_EVENT_HANDLING_TIMEOUT_TICKS=8640`, and mount a small persistent volume at `messages.spool_dir`. See the README, "Durable inbound texts".
+**Upgrading:** the upgrade adds a table and needs nothing else, but without the settings below a homeserver outage can still drop texts. Set `bridge.portal_event_buffer: 0`, `homeserver.retry_limit: 150` and `bridge.send_reconnect_wait: 1m`, the environment variable `MAUTRIX_EVENT_HANDLING_TIMEOUT_TICKS=8640`, and mount a small `emptyDir` at `messages.spool_dir`. See the README, "Durable inbound texts".
 
 ## [0.2.3] - 2026-10-09
 ### Added
@@ -81,7 +84,8 @@ First tagged release of the Matrix <-> SIP bridge.
 - A space cannot be renamed by a user at the default power level.
 - An inbound SMS cannot tell two DIDs apart on a trunk that does not echo the bridge's Contact; it falls back to that host's default line and says so in the log.
 
-[Unreleased]: https://github.com/lhns/matrix-sip-bridge/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/lhns/matrix-sip-bridge/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/lhns/matrix-sip-bridge/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/lhns/matrix-sip-bridge/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/lhns/matrix-sip-bridge/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/lhns/matrix-sip-bridge/compare/v0.2.0...v0.2.1
