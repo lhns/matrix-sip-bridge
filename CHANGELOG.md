@@ -6,7 +6,7 @@ Semantic Versioning.
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-10-22
+## [0.3.0] - 2026-10-23
 ### Added
 - Durable inbound texts: a text is stored in the bridge's database (table `sip_inbound_message`) before the SIP server is answered 200, then delivered to Matrix by a background worker that retries until bridgev2 reports success. A Synapse outage or a bridge restart no longer loses texts. See [ADR-0018](https://github.com/lhns/matrix-sip-bridge/blob/main/docs/adr/0018-inbound-texts-are-persisted-before-the-sip-answer.md).
 - `messages.spool_dir`: a local backup queue. When the database cannot take a text it is written there, one file each, and moved into the database once it is back. Empty disables it, and the text is then refused (SIP 500) while the database is down.

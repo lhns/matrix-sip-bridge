@@ -52,3 +52,6 @@ CREATE TABLE sip_inbound_message (
     line        TEXT    NOT NULL DEFAULT '',
     received_at BIGINT  NOT NULL
 );
+
+-- The worker picks each portal's earliest-received text (headInboundQuery).
+CREATE INDEX sip_inbound_message_head_idx ON sip_inbound_message (login_id, portal_id, received_at, id);

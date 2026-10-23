@@ -10,8 +10,8 @@ import (
 // InboundMessage is a text accepted from SIP that has not reached Matrix yet.
 // The json tags are the spool file format, so renaming one is a format change.
 type InboundMessage struct {
-	// ID breaks ties in delivery order. It is assigned by the table and is zero until read
-	// back, so it is not part of the spool format.
+	// ID breaks ties in delivery order. It is assigned by the table and is zero
+	// until read back, so it is not part of the spool format.
 	ID int64 `json:"-"`
 	// UID is minted when the text is accepted. It is the idempotency key for
 	// the spool-to-table move and the base of the bridgev2 message ID.
