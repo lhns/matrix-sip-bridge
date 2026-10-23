@@ -67,7 +67,15 @@ const (
 // does not retry -- which is why drops are counted at all: nothing else makes
 // them visible.
 const (
-	MessageBridged          = "bridged"
+	// MessageBridged is a text persisted in the inbound outbox, which answers
+	// the SIP server 200; delivery to Matrix follows from there.
+	MessageBridged = "bridged"
+	// MessageSpooled is a text persisted to the local spool because the
+	// database was unavailable. Also answered 200; not counted as bridged.
+	MessageSpooled = "spooled"
+	// MessagePersistFailed is a text neither the database nor the spool
+	// took; answered 500 so the SIP server knows.
+	MessagePersistFailed    = "persist_failed"
 	MessageDroppedBadSender = "dropped_unparseable_sender"
 	// MessageRefusedRecipient is a recipient header naming nobody the bridge
 	// may deliver to; unlike the drops it is answered with a failure status.
@@ -88,7 +96,7 @@ const (
 
 var (
 	callOutcomes            = []string{OutcomeAnswered, OutcomeMissed, OutcomeDeclined, OutcomeFailed, OutcomeStale, OutcomeAnsweredElsewhere}
-	inboundMessageOutcomes  = []string{MessageBridged, MessageDroppedBadSender, MessageRefusedRecipient, MessageRejectedMediaType, MessageRejectedNoHandler}
+	inboundMessageOutcomes  = []string{MessageBridged, MessageSpooled, MessagePersistFailed, MessageDroppedBadSender, MessageRefusedRecipient, MessageRejectedMediaType, MessageRejectedNoHandler}
 	outboundMessageOutcomes = []string{MessageSent, MessageRejected, MessageTooLong, MessageError}
 )
 
@@ -110,6 +118,8 @@ type Recorder struct {
 	messages   *prometheus.CounterVec
 	start      prometheus.Gauge
 	sipListen  prometheus.Gauge
+	outbox     prometheus.Gauge
+	spool      prometheus.Gauge
 }
 
 // NewRegistry is the registry the bridge exposes. It is its own rather than
@@ -161,8 +171,16 @@ func New(reg prometheus.Registerer) *Recorder {
 			Name: "sip_bridge_sip_listen_timestamp_seconds",
 			Help: "Unix time at which the SIP listener bound, or 0 if it never has.",
 		}),
+		outbox: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "sip_bridge_inbound_outbox_depth",
+			Help: "Inbound texts accepted from SIP and not yet delivered to Matrix.",
+		}),
+		spool: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "sip_bridge_inbound_spool_depth",
+			Help: "Inbound texts on the local spool, waiting to be moved into the database.",
+		}),
 	}
-	reg.MustRegister(r.calls, r.callSetup, r.registered, r.trunk, r.messages, r.start, r.sipListen)
+	reg.MustRegister(r.calls, r.callSetup, r.registered, r.trunk, r.messages, r.start, r.sipListen, r.outbox, r.spool)
 
 	for _, direction := range []string{DirectionInbound, DirectionOutbound} {
 		r.callSetup.WithLabelValues(direction)
@@ -257,4 +275,20 @@ func (r *Recorder) SIPListening() {
 		return
 	}
 	r.sipListen.Set(float64(time.Now().Unix()))
+}
+
+// InboundOutboxDepth publishes how many texts wait in the inbound outbox.
+func (r *Recorder) InboundOutboxDepth(n int) {
+	if r == nil {
+		return
+	}
+	r.outbox.Set(float64(n))
+}
+
+// InboundSpoolDepth publishes how many texts wait on the local spool.
+func (r *Recorder) InboundSpoolDepth(n int) {
+	if r == nil {
+		return
+	}
+	r.spool.Set(float64(n))
 }

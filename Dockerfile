@@ -30,7 +30,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
         -ldflags="-s -w" \
         -o /callaudit ./cmd/callaudit
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=build /matrix-sip-bridge /matrix-sip-bridge
 COPY --from=build /callaudit /callaudit
 ENTRYPOINT ["/matrix-sip-bridge"]

@@ -16,9 +16,11 @@ var families = map[string]int{
 	"sip_bridge_call_setup_seconds":           2,  // 2 directions
 	"sip_bridge_sip_registered":               1,
 	"sip_bridge_trunk_reconcile_total":        2,
-	"sip_bridge_messages_total":               9, // 5 inbound outcomes + 4 outbound
+	"sip_bridge_messages_total":               11, // 7 inbound outcomes + 4 outbound
 	"sip_bridge_start_timestamp_seconds":      1,
 	"sip_bridge_sip_listen_timestamp_seconds": 1,
+	"sip_bridge_inbound_outbox_depth":         1,
+	"sip_bridge_inbound_spool_depth":          1,
 }
 
 // A family that only appears once it has fired cannot answer "has this stopped

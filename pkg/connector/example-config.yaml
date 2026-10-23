@@ -72,6 +72,13 @@ messages:
     outbound_from: sip:+15551234567@example.com
     # Advertised to Matrix clients as the room's text limit.
     max_length: 1600
+    # Directory for the local backup queue of inbound texts. A text is stored
+    # in the database before the SIP server is answered 200; if the database
+    # cannot take it, it is written here instead and moved into the database
+    # when it is back. Empty disables the backup: the text is then refused
+    # (SIP 500) while the database is down. Mount a small emptyDir here
+    # (survives a container restart, not pod deletion); a PVC is optional.
+    spool_dir: ""
 
 # Call bridging: real media, via a conference on the SIP server and
 # livekit-sip. The bridge itself never carries audio.
